@@ -3,7 +3,7 @@
 // import { useNavigate } from "react-router-dom";
 // import axios from "axios";
 // import { FaUser, FaLock } from "react-icons/fa";
-// import logo from "../image/mutkehostel.png";
+// import logo from "../image/vrundaLogo.png";
 // import bgImage from "../image/hostelbg.png";
 // import "../stylecss/LoginRegister.css";
 
@@ -485,7 +485,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { FaUser, FaLock } from "react-icons/fa";
-import logo from "../image/mutkehostel.png";
+import logo from "../image/vrundaLogo.png";
 import bgImage from "../image/hostelbg.png";
 import "../stylecss/LoginRegister.css";
 
@@ -832,18 +832,18 @@ const Log = () => {
               </h2>
 
               <div className="btn-group mb-3" role="group" aria-label="Role switch">
-                <button
+                {/* <button
                   className={`btn ${role === "admin" ? "btn-primary" : "btn-outline-primary"}`}
                   onClick={() => setRole("admin")}
                 >
                   Admin
-                </button>
-                <button
+                </button> */}
+                {/* <button
                   className={`btn ${role === "tenant" ? "btn-primary" : "btn-outline-primary"}`}
                   onClick={() => setRole("tenant")}
                 >
                   Tenant
-                </button>
+                </button> */}
               </div>
 
               {role === "admin" && (
@@ -959,3 +959,4 @@ const Log = () => {
 };
 
 export default Log;
+

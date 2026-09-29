@@ -361,8 +361,10 @@ const OtherExpense = ({ embedded = false }) => {
                 <h5>Add Other Expense</h5>
                 <button
                   className="btn-close"
-                  onClick={() => setShowAddModal(false)}
-                />
+                  onClick={() => setShowAddModal(false)} style={{padding:"0px",margin:"0px"} }
+                  >
+                x
+                </button>
               </div>
 
               <div className="modal-body">

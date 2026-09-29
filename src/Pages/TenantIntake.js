@@ -4,7 +4,8 @@ import axios from "axios";
 import "../form.css";
 import { useNavigate } from "react-router-dom";
 
-const API = " http://localhost:8000/api";
+const API = "http://localhost:8000/api";
+const API_ROOT = String(API).replace(/\/+$/, "");
 
 function TenantIntake() {
   const [formData, setFormData] = useState({
@@ -84,14 +85,14 @@ function TenantIntake() {
      ✅ pulls formId + srNo + prefill
   ============================ */
   useEffect(() => {
-    const token = params.get("inv");
+    const token = params.get("inv")?.trim().replace(/\/+$/, "");
     if (!token) return;
 
     setInviteToken(token);
 
     (async () => {
       try {
-        const r = await axios.get(`${API}/invites/${token}`);
+        const r = await axios.get(`${API_ROOT}/invites/${token}`);
 
         const fid = r.data?.formId || r.data?.form?._id;
         if (fid) setFormId(String(fid));
@@ -137,7 +138,7 @@ function TenantIntake() {
   ============================ */
   const fetchSrNo = async () => {
     try {
-      const res = await axios.get(`${API}/forms/count`);
+      const res = await axios.get(`${API_ROOT}/forms/count`);
       setFormData((prev) => ({ ...prev, srNo: res.data.nextSrNo }));
       return res.data.nextSrNo;
     } catch (err) {
@@ -164,6 +165,7 @@ function TenantIntake() {
     "baseRent",
     "rentAmount",
     "depositAmount",
+    "joiningDate",
   ];
 
   const handleChange = (e) => {
@@ -278,20 +280,43 @@ function TenantIntake() {
     setSubmitting(true);
 
     try {
-      if (!inviteToken) {
-        alert("Invite token missing. Please open the original invite link.");
-        return;
-      }
+    if (!inviteToken) {
+      alert("Invite token missing. Please open the original invite link.");
+      return;
+    }
 
       if (!formId) {
         alert("formId missing. Admin invite must create & link a draft form.");
         return;
       }
 
-      if (!formData.category?.trim()) return alert("Category is required");
-      if (!formData.name?.trim()) return alert("Name is required");
-      if (!formData.joiningDate) return alert("Joining Date is required");
-      if (!formData.address?.trim()) return alert("Address is required");
+      const requiredFields = [
+        ["category", "Category"],
+        ["name", "Name"],
+        ["phoneNo", "Phone No"],
+        ["address", "Address"],
+        ["joiningDate", "Joining Date"],
+        ["dob", "DOB"],
+        ["relativeAddress", "Relative Address"],
+        ["relative1Relation", "Relative 1 Relation"],
+        ["relative1Name", "Relative 1 Name"],
+        ["relative1Phone", "Relative 1 Phone"],
+        ["relative2Relation", "Relative 2 Relation"],
+        ["relative2Name", "Relative 2 Name"],
+        ["relative2Phone", "Relative 2 Phone"],
+        ["companyAddress", "Company / College"],
+        ["dateOfJoiningCollege", "Date of Joining College/Office"],
+        ["roomNo", "Room No"],
+        ["bedNo", "Bed No"],
+        ["rentAmount", "Rent Amount"],
+        ["depositAmount", "Deposit Amount"],
+      ];
+
+      for (const [key, label] of requiredFields) {
+        if (!String(formData[key] ?? "").trim()) {
+          return alert(`${label} is required`);
+        }
+      }
 
       if (formData.phoneNo && !/^\d{10}$/.test(formData.phoneNo))
         return alert("Enter valid 10-digit phone number.");
@@ -301,6 +326,14 @@ function TenantIntake() {
 
       if (formData.relative2Phone && !/^\d{10}$/.test(formData.relative2Phone))
         return alert("Relative 2 phone must be 10 digits.");
+
+      // ✅ Documents required (self Aadhaar, parent Aadhaar, photo)
+      if (!selfAadharFile || !parentAadharFile || !photoFile) {
+        setDocMsg("Please upload Self Aadhaar, Parent Aadhaar, and Tenant Photo.");
+        return;
+      } else {
+        setDocMsg("");
+      }
 
       const documents = await uploadDocsIfAny([...docFiles]);
 
@@ -322,7 +355,7 @@ function TenantIntake() {
         roomNo: payload.roomNo,
         bedNo: payload.bedNo,
       });
-await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
+await axios.put(`${API_ROOT}/invites/${inviteToken}/submit`, payload);
 
 
       if (isTenant) navigate("/form-submitted");
@@ -376,6 +409,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
             onChange={handleChange}
             className="form-input"
             readOnly={isTenant || isLocked}
+            required
           />
         </div>
 
@@ -388,61 +422,70 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
             onChange={handleChange}
             className="form-input"
             readOnly={isTenant || isLocked}
+            required
           />
         </div>
 
         {/* ADDRESS */}
         <div className="form-group">
           <label>Address</label>
-          <input name="address" value={formData.address} onChange={handleChange} className="form-input" />
+          <input name="address" value={formData.address} onChange={handleChange} className="form-input" required />
         </div>
 
         {/* JOINING */}
         <div className="form-group">
           <label>Joining Date</label>
-          <input type="date" name="joiningDate" value={formData.joiningDate} onChange={handleChange} className="form-input" />
+          <input
+            type="date"
+            name="joiningDate"
+            value={formData.joiningDate}
+            onChange={handleChange}
+            className="form-input"
+            readOnly={isTenant || isLocked}
+            required
+          />
         </div>
 
         {/* DOB */}
         <div className="form-group">
           <label>DOB</label>
-          <input type="date" name="dob" value={formData.dob} onChange={handleChange} className="form-input" />
+          <input type="date" name="dob" value={formData.dob} onChange={handleChange} className="form-input" required />
         </div>
 
         {/* RELATIVE ADDRESS */}
         <div className="form-group">
           <label>Relative Address</label>
-          <input name="relativeAddress" value={formData.relativeAddress} onChange={handleChange} className="form-input" />
+          <input name="relativeAddress" value={formData.relativeAddress} onChange={handleChange} className="form-input" required />
         </div>
 
         {/* RELATIVE 1 */}
         <fieldset className="form-group">
           <legend>Relative 1</legend>
-          <select name="relative1Relation" value={formData.relative1Relation} onChange={handleChange} className="form-input">
+          <select name="relative1Relation" value={formData.relative1Relation} onChange={handleChange} className="form-input" required>
             {["Self", "Sister", "Brother", "Father", "Husband", "Mother"].map((r) => (
               <option key={r}>{r}</option>
             ))}
           </select>
-          <input name="relative1Name" value={formData.relative1Name} onChange={handleChange} className="form-input" placeholder="Name" />
-          <input name="relative1Phone" value={formData.relative1Phone} onChange={handleChange} className="form-input" placeholder="10 digit" />
+          <input name="relative1Name" value={formData.relative1Name} onChange={handleChange} className="form-input" placeholder="Name" required />
+          <input name="relative1Phone" value={formData.relative1Phone} onChange={handleChange} className="form-input" placeholder="10 digit" required />
         </fieldset>
 
         {/* RELATIVE 2 */}
         <fieldset className="form-group">
           <legend>Relative 2</legend>
-          <select name="relative2Relation" value={formData.relative2Relation} onChange={handleChange} className="form-input">
+          <select name="relative2Relation" value={formData.relative2Relation} onChange={handleChange} className="form-input" required>
             {["Self", "Sister", "Brother", "Father", "Husband", "Mother"].map((r) => (
               <option key={r}>{r}</option>
             ))}
           </select>
-          <input name="relative2Name" value={formData.relative2Name} onChange={handleChange} className="form-input" placeholder="Name" />
-          <input name="relative2Phone" value={formData.relative2Phone} onChange={handleChange} className="form-input" placeholder="10 digit" />
+          <input name="relative2Name" value={formData.relative2Name} onChange={handleChange} className="form-input" placeholder="Name" required />
+          <input name="relative2Phone" value={formData.relative2Phone} onChange={handleChange} className="form-input" placeholder="10 digit" required />
         </fieldset>
 
         {/* COMPANY */}
         <div className="form-group">
           <label>Company / College</label>
-          <input name="companyAddress" value={formData.companyAddress} onChange={handleChange} className="form-input" />
+          <input name="companyAddress" value={formData.companyAddress} onChange={handleChange} className="form-input" required />
         </div>
 
         {/* JOINING COLLEGE */}
@@ -454,6 +497,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
             value={formData.dateOfJoiningCollege}
             onChange={handleChange}
             className="form-input"
+            required
           />
         </div>
 
@@ -467,6 +511,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
               onChange={handleChange}
               className="form-input"
               readOnly={isLocked}
+              required
             />
           </div>
         )}
@@ -480,6 +525,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
             onChange={handleChange}
             className="form-input"
             readOnly={isTenant || isLocked}
+            required
           />
         </div>
 
@@ -492,6 +538,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
             onChange={handleChange}
             className="form-input"
             readOnly={isTenant || isLocked}
+            required
           />
         </div>
 
@@ -504,6 +551,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
             onChange={handleRentAmountChange}
             className="form-input"
             readOnly={isTenant || isLocked}
+            required
           />
         </div>
 
@@ -522,6 +570,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
             }}
             className="form-input"
             readOnly={isTenant || isLocked}
+            required
           />
         </div>
 
@@ -536,6 +585,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
               type="file"
               accept="image/*,application/pdf"
               className="form-input"
+              required
               onChange={(e) => {
                 const file = e.target.files?.[0] || null;
                 setSelfAadharFile(file);
@@ -556,6 +606,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
               type="file"
               accept="image/*,application/pdf"
               className="form-input"
+              required
               onChange={(e) => {
                 const file = e.target.files?.[0] || null;
                 setParentAadharFile(file);
@@ -577,6 +628,7 @@ await axios.put(`${API}/invites/${inviteToken}/submit`, payload);
               accept="image/*"
               capture="user"
               className="form-input"
+              required
               onChange={(e) => {
                 const file = e.target.files?.[0] || null;
                 setPhotoFile(file);

@@ -398,7 +398,10 @@ const LightBill = ({ embedded }) => {
 
               <div className="modal-header">
                 <h5>Add Light Bill</h5>
-                <button className="btn-close" onClick={() => setShowAddModal(false)} />
+                <button className="btn-close" onClick={() => setShowAddModal(false)}  style={{padding:"0px",margin:"0px"} }
+                 >
+                x
+                </button>
               </div>
 
               <div className="modal-body">

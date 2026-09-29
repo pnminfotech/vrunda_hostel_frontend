@@ -2,7 +2,7 @@
 // import jsPDF from "jspdf";
 // import html2canvas from "html2canvas";
 // import "../Maintanace/FormDownload.css";
-// import Img from "../../image/mutkehostel.png";
+// import Img from "../../image/vrundaLogo.png";
 // import RuleImg from "../../assets/rulebook.jpg";
 
 // const FormDownload = ({ formData }) => {
@@ -200,8 +200,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import "../Maintanace/FormDownload.css";
-import Img from "../../image/mutkehostel.png";
-import RuleImg from "../../assets/rulebook.jpg";
+import Img from "../../image/vrundaLogo.png";
+import RuleImg from "../../assets/rulebookvrunda.png";
 import { api } from "../../api";
 
 const FormDownload = ({ formData }) => {
@@ -213,6 +213,7 @@ const FormDownload = ({ formData }) => {
   });
 
   const [tenantDoc, setTenantDoc] = useState(null);
+  const [photoDataUrl, setPhotoDataUrl] = useState("");
 
   // ---------------- Helpers ----------------
   const safe = (v) =>
@@ -415,16 +416,19 @@ const FormDownload = ({ formData }) => {
           .map((b) => Number(pickRentFromBed(b)))
           .filter((n) => !Number.isNaN(n) && n > 0);
 
-        const minPrice =
-          allPrices.length > 0 ? Math.min(...allPrices) : "";
+        const minPrice = allPrices.length > 0 ? Math.min(...allPrices) : "";
 
         const resolvedBedNo = bedObj?.bedNo
           ? `bed ${String(bedObj.bedNo).trim()}`
-          : (!isBadBed(tenantBed) ? tenantBed : "");
+          : !isBadBed(tenantBed)
+          ? tenantBed
+          : "";
 
         const resolvedBedRent = bedObj
           ? pickRentFromBed(bedObj)
-          : (tenantRentHint != null ? tenantRentHint : minPrice);
+          : tenantRentHint != null
+          ? tenantRentHint
+          : minPrice;
 
         if (cancelled) return;
 
@@ -457,7 +461,9 @@ const FormDownload = ({ formData }) => {
 
   const bedDisplay = !isBadBed(data?.bedNo)
     ? data?.bedNo
-    : (roomMeta?.bedNo ? roomMeta.bedNo : "_________");
+    : roomMeta?.bedNo
+    ? roomMeta.bedNo
+    : "_________";
 
   // ---------------- PDF Download ----------------
   const handleDownload = async () => {
@@ -518,44 +524,112 @@ const FormDownload = ({ formData }) => {
     pdf.save(`Admission_Form_${data?.srNo || ""}.pdf`);
   };
 
-
-
-
-
-
-
-
-// pick photo from documents[]: prefer relation "Self"
+  // ✅ STRICT PHOTO ONLY (NO OTHER DOC IMAGE)
+// ✅ STRICT: Tenant selfie only (never Aadhaar)
 const photoUrl = useMemo(() => {
-  const docs = Array.isArray(data?.documents) ? data.documents : [];
+  const docs = Array.isArray(data?.documents)
+    ? data.documents
+    : Array.isArray(data?.docs)
+    ? data.docs
+    : Array.isArray(data?.files)
+    ? data.files
+    : [];
 
-  const selfDoc =
-    docs.find(
-      (d) =>
-        String(d?.relation || "").toLowerCase() === "self" &&
-        String(d?.contentType || "").toLowerCase().startsWith("image") &&
-        d?.url
-    ) || null;
+  const isImage = (d) => {
+    const ct = String(d?.contentType || d?.type || d?.mime || "").toLowerCase();
+    const name = String(d?.fileName || d?.name || "").toLowerCase();
+    return ct.startsWith("image/") || /\.(png|jpe?g|webp|gif|heic|heif|avif)$/i.test(name);
+  };
 
-  const anyImgDoc =
-    docs.find(
-      (d) =>
-        String(d?.contentType || "").toLowerCase().startsWith("image") && d?.url
-    ) || null;
+  // ✅ use your api baseURL (works for localhost + live)
+  const getUrl = (d) => {
+    const raw = d?.url || d?.fileUrl || d?.path || d?.secure_url || d?.location || "";
+    if (!raw) return "";
+    if (raw.startsWith("http")) return raw;
 
-  return selfDoc?.url || anyImgDoc?.url || "";
-}, [data?.documents]);
+    // api is axios instance from ../../api
+    const base = String(api?.defaults?.baseURL || "").replace(/\/+$/, "");
+    if (!base) return raw;
+    return `${base}/${String(raw).replace(/^\/+/, "")}`;
+  };
 
+  const rel = (d) => String(d?.relation || d?.docType || d?.documentType || "").toLowerCase().trim();
+  const fname = (d) => String(d?.fileName || d?.name || "").toLowerCase();
 
+  // ✅ block Aadhaar always
+  const isAadhaar = (d) => /aadhaar|aadhar|uidai|uid/.test(fname(d)) || /aadhaar|aadhar/.test(rel(d));
 
+  // ✅ 1) NEW SYSTEM: exact label
+  const explicitPhoto = docs.find(
+    (d) =>
+      isImage(d) &&
+      !isAadhaar(d) &&
+      getUrl(d) &&
+      (rel(d) === "tenant photo" || rel(d) === "photo" || rel(d) === "selfie" || rel(d) === "profile photo")
+  );
+  if (explicitPhoto) return getUrl(explicitPhoto);
 
+  // ✅ 2) OLD SYSTEM fallback: choose LAST "Self" image that is NOT Aadhaar
+  const selfImages = docs.filter(
+    (d) => isImage(d) && !isAadhaar(d) && getUrl(d) && rel(d) === "self"
+  );
+  if (selfImages.length > 0) {
+    return getUrl(selfImages[selfImages.length - 1]); // ✅ last Self image = selfie
+  }
 
+  // ✅ 3) Optional: if photo filenames contain hints
+  const hinted = docs.find(
+    (d) =>
+      isImage(d) &&
+      !isAadhaar(d) &&
+      getUrl(d) &&
+      /photo|selfie|tenant|profile|passport/.test(fname(d))
+  );
+  if (hinted) return getUrl(hinted);
 
+  return "";
+}, [data]);
 
-  
+  useEffect(() => {
+    let cancelled = false;
+
+    async function toDataUrl(url) {
+      try {
+        const res = await fetch(url, { mode: "cors" });
+        const blob = await res.blob();
+
+        const reader = new FileReader();
+        const dataUrl = await new Promise((resolve, reject) => {
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+
+        return dataUrl;
+      } catch (e) {
+        return "";
+      }
+    }
+
+    (async () => {
+      if (!photoUrl) {
+        setPhotoDataUrl("");
+        return;
+      }
+
+      const durl = await toDataUrl(photoUrl);
+      if (!cancelled) setPhotoDataUrl(durl || "");
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [photoUrl]);
+
   // ---------------- UI ----------------
   return (
-    <div>
+    <div className="form-download-root">
+      <div className="form-pages">
       <div id="form-page" className="form-container">
         <header className="form-header">
           <img src={Img} alt="Logo" className="form-logo" />
@@ -564,30 +638,33 @@ const photoUrl = useMemo(() => {
               <span>Form No:</span>
               <div className="form-box">{data?.srNo || ""}</div>
             </div>
-            <p style={{ marginLeft: "-118px", marginTop: "4px", fontSize: "12px" }}>
+            <p style={{ marginTop: "4px", fontSize: "12px" }}>
               New Admission Form
             </p>
           </div>
-         <div className="form-photo-box">
-  {photoUrl ? (
-    <img
-      src={photoUrl}
-      alt="Occupant"
-      className="form-photo"
-      crossOrigin="anonymous"
-    />
-  ) : (
-    <div style={{ fontSize: 10, textAlign: "center" }}>PHOTO</div>
-  )}
-</div>
 
+          <div className="form-photo-box">
+            {photoDataUrl ? (
+              <img src={photoDataUrl} alt="Occupant" className="form-photo" />
+            ) : (
+              <div style={{ fontSize: 10, textAlign: "center" }}>PHOTO</div>
+            )}
+          </div>
         </header>
 
         <div className="form-body">
-          <p><strong>SR No:</strong> {data?.srNo || "_________"}</p>
-          <p><strong>Name Of Occupant:</strong> {safeText(data?.name)}</p>
-          <p><strong>Phone No:</strong> {safeText(data?.phoneNo)}</p>
-          <p><strong>Address:</strong> {safeText(data?.address)}</p>
+          <p>
+            <strong>SR No:</strong> {data?.srNo || "_________"}
+          </p>
+          <p>
+            <strong>Name Of Occupant:</strong> {safeText(data?.name)}
+          </p>
+          <p>
+            <strong>Phone No:</strong> {safeText(data?.phoneNo)}
+          </p>
+          <p>
+            <strong>Address:</strong> {safeText(data?.address)}
+          </p>
 
           <hr />
 
@@ -608,26 +685,45 @@ const photoUrl = useMemo(() => {
           <hr />
 
           <p>
-            <strong>Name & Address of Company/College/Institute/Other:</strong><br />
+            <strong>Name & Address of Company/College/Institute/Other:</strong>
+            <br />
             {safeText(data?.companyAddress, "________________________________")}
           </p>
 
-          <p><strong>Date Of Joining (Company/College):</strong> {safeDate(data?.dateOfJoiningCollege)}</p>
-          <p><strong>Hostel Joining Date:</strong> {safeDate(data?.joiningDate)}</p>
-
           <p>
-            <strong>Category:</strong> {categoryVal} &nbsp;&nbsp;&nbsp;
-            <strong>Floor No:</strong> {floorVal} &nbsp;&nbsp;&nbsp;
-            <strong>Room  No:</strong> {safe(data?.roomNo) || "_________"} &nbsp;&nbsp;&nbsp;
-            <strong>Bed No:</strong> {bedDisplay}
+            <strong>Date Of Joining (Company/College):</strong> {safeDate(data?.dateOfJoiningCollege)}
+          </p>
+          <p>
+            <strong>Hostel Joining Date:</strong> {safeDate(data?.joiningDate)}
           </p>
 
-          <p>
-            <strong>Rent Amount:</strong> {fmtINR(rentVal)} &nbsp;&nbsp;&nbsp;
-            <strong>Deposit Amount:</strong> {fmtINR(data?.depositAmount)}
-          </p>
+          <div className="form-inline-grid">
+            <p>
+              <strong>Category:</strong> {categoryVal}
+            </p>
+            <p>
+              <strong>Floor No:</strong> {floorVal}
+            </p>
+            <p>
+              <strong>Room No:</strong> {safe(data?.roomNo) || "_________"}
+            </p>
+            <p>
+              <strong>Bed No:</strong> {bedDisplay}
+            </p>
+          </div>
 
-          <p><strong>Date Of Birth:</strong> {safeDate(data?.dob)}</p>
+          <div className="form-inline-grid two-col">
+            <p>
+              <strong>Rent Amount:</strong> {fmtINR(rentVal)}
+            </p>
+            <p>
+              <strong>Deposit Amount:</strong> {fmtINR(data?.depositAmount)}
+            </p>
+          </div>
+
+          <p>
+            <strong>Date Of Birth:</strong> {safeDate(data?.dob)}
+          </p>
 
           <p>
             <strong>Has Occupant Given Rules & Regulation Copy To Read & Understand:</strong>{" "}
@@ -637,21 +733,25 @@ const photoUrl = useMemo(() => {
 
         <footer className="form-footer">
           <div className="signature" style={{ fontSize: "10px" }}>
-            <p>Sign of Warden:</p><span>_____</span>
+            <p>Sign of Warden:</p>
+            <span>_____</span>
           </div>
           <div className="signature" style={{ fontSize: "10px" }}>
-            <p>Sign of Occupant:</p><span>_____</span>
+            <p>Sign of Occupant:</p>
+            <span>_____</span>
           </div>
           <div className="signature" style={{ fontSize: "10px" }}>
-            <p>Sign of Guardian:</p><span>_____</span>
+            <p>Sign of Guardian:</p>
+            <span>_____</span>
           </div>
         </footer>
 
-        <h6>Regards MUTKE HOSTEL</h6>
+        <h6>Regards Vrunda HOSTEL</h6>
       </div>
 
       <div id="rule-page" className="form-container">
         <img src={RuleImg} alt="rules" style={{ width: "100%" }} />
+      </div>
       </div>
 
       <button onClick={handleDownload} className="download-button">
@@ -662,3 +762,4 @@ const photoUrl = useMemo(() => {
 };
 
 export default FormDownload;
+

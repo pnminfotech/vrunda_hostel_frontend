@@ -4,6 +4,7 @@ import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import { FaArrowLeft } from "react-icons/fa";
 import "../Pages/RoomManager.css";
+
 const ROOM_COLORS = [
   "#eef5ff",
   "#e8f8f5",
@@ -25,17 +26,37 @@ const getRoomColor = (room) => {
 
   return ROOM_COLORS[Math.abs(hash) % ROOM_COLORS.length];
 };
-const apiUrl = " http://localhost:8000/api/rooms"; // change to your prod URL when needed
 
-/* Editable default categories – used only for filter dropdown & optional limits */
-const DEFAULT_CATEGORIES = ["Category 1", "Category 2", "Category 3", "Other"];
+const apiUrl = "http://localhost:8000/api/rooms"; // change to your prod URL when needed
 
+/* ✅ UPDATED default categories */
+const DEFAULT_CATEGORIES = ["Private", "Double Sharing", "3 Sharing"];
+
+/* (kept for compatibility; not used for limits anymore) */
 const CATEGORY_LIMITS_BY_INDEX = [
-  { floors: { "0": 10, "1": 10, "2": 10, "3": 10 } },
-  { floors: { "0": 10, "1": 10, "2": 10, "3": 10 } },
-  { floors: { "0": 10, "1": 10, "2": 10, "3": 10 } },
-  { floors: {} }, // other => no strict limit
+  { floors: {} },
+  { floors: {} },
+  { floors: {} },
 ];
+
+/* ✅ NEW: Total 45 beds => 3 floors => 15 beds per floor */
+const BED_LIMITS_BY_FLOOR = {
+  "0": 15, // Ground
+  "1": 15, // 1st
+  "2": 15, // 2nd
+};
+
+/* ✅ NEW: room category -> max beds allowed in that room */
+const ROOM_CAPACITY = {
+  private: 1,
+  "double sharing": 2,
+  "3 sharing": 3,
+};
+
+function getRoomCapacity(cat) {
+  const k = String(cat || "").trim().toLowerCase();
+  return ROOM_CAPACITY[k] ?? Infinity; // unknown category => don't block
+}
 
 function normalizeFloorKey(value) {
   const s = String(value ?? "").toLowerCase();
@@ -54,11 +75,6 @@ function floorLabelFromKey(k) {
   if (k === "3") return "3rd";
   return k || "Unknown";
 }
-
-
-// 🔵 Room color helper (safe – no side effects)
-
-
 
 // ✅ deterministic hash -> hue
 function hashStr(s) {
@@ -87,9 +103,9 @@ function roomColors(room) {
   const h = hashStr(key);
 
   // deterministic RGB from hash (more unique than hue-only)
-  const r = (h & 255);
-  const g = ((h >> 8) & 255);
-  const b = ((h >> 16) & 255);
+  const r = h & 255;
+  const g = (h >> 8) & 255;
+  const b = (h >> 16) & 255;
 
   // darker foreground for text/border
   const fr = Math.floor(r * 0.55);
@@ -101,8 +117,6 @@ function roomColors(room) {
     fg: `rgb(${fr}, ${fg}, ${fb})`,
   };
 }
-
-
 
 export default function RoomManager() {
   const [rooms, setRooms] = useState([]);
@@ -127,18 +141,18 @@ export default function RoomManager() {
   });
 
   const [showEditModal, setShowEditModal] = useState(false);
-const [editTarget, setEditTarget] = useState({
-  roomId: "",
-  roomNo: "",
-  bedNo: "",
-   bedCategory: "",
-  price: "",
-});
+  const [editTarget, setEditTarget] = useState({
+    roomId: "",
+    roomNo: "",
+    bedNo: "",
+    bedCategory: "",
+    price: "",
+  });
 
-
-  // 🔴 NEW: Delete bed modal state
+  // 🔴 Delete bed modal state (updated to include roomId)
   const [showDeleteBedModal, setShowDeleteBedModal] = useState(false);
   const [deleteBedState, setDeleteBedState] = useState({
+    roomId: "",
     roomNo: "",
     beds: [],
     selectedBedNo: "",
@@ -178,150 +192,134 @@ const [editTarget, setEditTarget] = useState({
     }
   };
 
-  /* -------- Derived values & limits (optional) -------- */
+  /* -------- Derived values -------- */
 
   const selectedCategoryIndex = useMemo(() => {
     const current = (roomForm.category || "").trim().toLowerCase();
     if (!current) return -1;
-    return categories.findIndex(
-      (c) => (c || "").trim().toLowerCase() === current
-    );
+    return categories.findIndex((c) => (c || "").trim().toLowerCase() === current);
   }, [categories, roomForm.category]);
 
-  const floorKey = useMemo(
-    () => normalizeFloorKey(roomForm.floorNo),
-    [roomForm.floorNo]
-  );
+  const floorKey = useMemo(() => normalizeFloorKey(roomForm.floorNo), [roomForm.floorNo]);
 
-  const currentCountOnFloor = useMemo(() => {
-    if (!roomForm.category || !floorKey || selectedCategoryIndex < 0) return 0;
-    const catName = categories[selectedCategoryIndex];
-    return rooms.filter(
-      (r) =>
-        (r.category || "").trim().toLowerCase() ===
-          (catName || "").trim().toLowerCase() &&
-        normalizeFloorKey(r.floorNo) === floorKey
-    ).length;
-  }, [rooms, roomForm.category, floorKey, categories, selectedCategoryIndex]);
+  /* ✅ NEW: Beds used on floor + bed limits */
+  const bedsUsedOnFloor = useMemo(() => {
+    const k = floorKey;
+    if (!k) return 0;
+    return rooms.reduce((sum, r) => {
+      if (normalizeFloorKey(r.floorNo) !== k) return sum;
+      return sum + (r.beds?.length || 0);
+    }, 0);
+  }, [rooms, floorKey]);
 
-  const limitForFloor = useMemo(() => {
-    if (selectedCategoryIndex < 0) return undefined;
-    const def = CATEGORY_LIMITS_BY_INDEX[selectedCategoryIndex] || { floors: {} };
-    return def.floors[floorKey];
-  }, [selectedCategoryIndex, floorKey]);
+  const bedLimitForFloor = useMemo(() => BED_LIMITS_BY_FLOOR[floorKey], [floorKey]);
 
-  const remainingOnFloor = useMemo(() => {
-    if (limitForFloor === undefined) return Infinity;
-    return Math.max(0, limitForFloor - currentCountOnFloor);
-  }, [limitForFloor, currentCountOnFloor]);
+  const bedsRemainingOnFloor = useMemo(() => {
+    if (bedLimitForFloor === undefined) return Infinity;
+    return Math.max(0, bedLimitForFloor - bedsUsedOnFloor);
+  }, [bedLimitForFloor, bedsUsedOnFloor]);
+
+  /* kept for compatibility (not used for limits anymore) */
+  const currentCountOnFloor = useMemo(() => 0, []);
+  const limitForFloor = useMemo(() => undefined, []);
+  const remainingOnFloor = useMemo(() => Infinity, []);
+
+  /* ✅ Reuse your existing variable name so UI stays same */
+  const remainingHint =
+    roomForm.floorNo && floorKey
+      ? bedLimitForFloor === undefined
+        ? "No bed limit configured for this floor."
+        : `Bed Limit: ${bedLimitForFloor} • Used: ${bedsUsedOnFloor} • Remaining: ${bedsRemainingOnFloor}`
+      : "";
 
   /* -------- Add Room (with optional first bed) -------- */
 
- const addRoom = async () => {
-  const category = roomForm.category.trim();
-  const floorNo = roomForm.floorNo.trim();
-  const roomNo = roomForm.roomNo.trim();
-  const firstBedNo = roomForm.bedNo.trim();
-  const firstBedCategory = roomForm.bedCategory.trim();
-  const firstBedPrice = roomForm.bedPrice ? Number(roomForm.bedPrice) : null; // ✅ NEW
+  const addRoom = async () => {
+    const category = roomForm.category.trim();
+    const floorNo = roomForm.floorNo.trim();
+    const roomNo = roomForm.roomNo.trim();
+    const firstBedNo = roomForm.bedNo.trim();
+    const firstBedCategory = roomForm.bedCategory.trim();
+    const firstBedPrice = roomForm.bedPrice ? Number(roomForm.bedPrice) : null;
 
-  if (!category) {
-    alert("Please enter a Category.");
-    return;
-  }
-  if (!roomNo) {
-    alert("Room No is required.");
-    return;
-  }
-  if (!floorNo) {
-    alert("Please enter a Floor.");
-    return;
-  }
+    if (!category) {
+      alert("Please enter a Category.");
+      return;
+    }
+    if (!roomNo) {
+      alert("Room No is required.");
+      return;
+    }
+    if (!floorNo) {
+      alert("Please enter a Floor.");
+      return;
+    }
 
-  const normalized = normalizeFloorKey(floorNo);
-  const catIndex = categories.findIndex(
-    (c) => (c || "").trim().toLowerCase() === category.toLowerCase()
-  );
+    const normalized = normalizeFloorKey(floorNo);
 
-  if (catIndex !== -1 && normalized) {
-    const limitConfig = CATEGORY_LIMITS_BY_INDEX[catIndex] || { floors: {} };
-    const floorLimit = limitConfig.floors[normalized];
-    if (floorLimit !== undefined) {
-      const usedOnFloor = rooms.filter(
-        (r) =>
-          (r.category || "").trim().toLowerCase() ===
-            category.trim().toLowerCase() &&
-          normalizeFloorKey(r.floorNo) === normalized
-      ).length;
-      if (usedOnFloor >= floorLimit) {
+    // ✅ NEW: Floor bed limit check (only if adding first bed)
+    const floorBedLimit = BED_LIMITS_BY_FLOOR[normalized];
+    if (firstBedNo && floorBedLimit !== undefined) {
+      const usedOnThatFloor = rooms.reduce((sum, r) => {
+        if (normalizeFloorKey(r.floorNo) !== normalized) return sum;
+        return sum + (r.beds?.length || 0);
+      }, 0);
+      if (usedOnThatFloor + 1 > floorBedLimit) {
         alert(
-          `Limit reached: ${category} ${floorLabelFromKey(
-            normalized
-          )} floor allows max ${floorLimit} rooms.`
+          `Bed limit reached on ${floorLabelFromKey(normalized)} floor. Max ${floorBedLimit} beds allowed.`
         );
         return;
       }
     }
-  }
 
+    // ✅ NEW: Room capacity check (Private=1, Double=2, 3 Sharing=3) for first bed
+    const cap = getRoomCapacity(category);
+    if (firstBedNo && cap !== Infinity && 1 > cap) {
+      alert(`${category} room can have max ${cap} bed(s).`);
+      return;
+    }
 
-
-
-
-
-
-
-
-
-
-
-
-
-const dup = rooms.some(
-  (r) =>
-    String(r.roomNo).trim().toLowerCase() === roomNo.toLowerCase() &&
-    String(r.category || "").trim().toLowerCase() === category.toLowerCase()
-);
-if (dup) {
-  alert("Room already exists in this category.");
-  return;
-}
-
-
-  try {
-    // 1) Create room
-  const created = await axios.post(apiUrl, { category, floorNo, roomNo });
-const createdRoom = created.data; // must include _id
-
-if (firstBedNo) {
-  await axios.post(`${apiUrl}/${createdRoom._id}/bed`, {
-    bedNo: firstBedNo,
-    bedCategory: firstBedCategory || "",
-    price: firstBedPrice,
-  });
-}
-
-
-    // reset form
-    setRoomForm({
-      category: "",
-      floorNo: "",
-      roomNo: "",
-      bedNo: "",
-      bedCategory: "",
-      bedPrice: "", // ✅ reset
-    });
-
-    fetchRooms();
-  } catch (error) {
-    console.error("Error adding room:", error);
-    alert(
-      error.response?.data?.message ||
-        "Failed to add room (check console for details)."
+    // duplicate room check (same category + roomNo)
+    const dup = rooms.some(
+      (r) =>
+        String(r.roomNo).trim().toLowerCase() === roomNo.toLowerCase() &&
+        String(r.category || "").trim().toLowerCase() === category.toLowerCase()
     );
-  }
-};
+    if (dup) {
+      alert("Room already exists in this category.");
+      return;
+    }
 
+    try {
+      // 1) Create room
+      const created = await axios.post(apiUrl, { category, floorNo, roomNo });
+      const createdRoom = created.data; // must include _id
+
+      // 2) Add optional first bed
+      if (firstBedNo) {
+        await axios.post(`${apiUrl}/${createdRoom._id}/bed`, {
+          bedNo: firstBedNo,
+          bedCategory: firstBedCategory || "",
+          price: firstBedPrice,
+        });
+      }
+
+      // reset form
+      setRoomForm({
+        category: "",
+        floorNo: "",
+        roomNo: "",
+        bedNo: "",
+        bedCategory: "",
+        bedPrice: "",
+      });
+
+      fetchRooms();
+    } catch (error) {
+      console.error("Error adding room:", error);
+      alert(error.response?.data?.message || "Failed to add room (check console for details).");
+    }
+  };
 
   /* -------- Bed operations -------- */
 
@@ -336,13 +334,39 @@ if (firstBedNo) {
       alert("Bed No is required.");
       return;
     }
-    try {
-   await axios.post(`${apiUrl}/${selectedRoom._id}/bed`, {
-  bedNo: bedForm.bedNo.trim(),
-  bedCategory: bedForm.bedCategory.trim(),
-  price: bedForm.price ? Number(bedForm.price) : null,
-});
 
+    // ✅ NEW: Floor bed limit check
+    const selectedFloorKey = normalizeFloorKey(selectedRoom.floorNo);
+    const limit = BED_LIMITS_BY_FLOOR[selectedFloorKey];
+
+    if (limit !== undefined) {
+      const used = rooms.reduce((sum, r) => {
+        if (normalizeFloorKey(r.floorNo) !== selectedFloorKey) return sum;
+        return sum + (r.beds?.length || 0);
+      }, 0);
+
+      if (used + 1 > limit) {
+        alert(
+          `Bed limit reached on ${floorLabelFromKey(selectedFloorKey)} floor. Max ${limit} beds allowed.`
+        );
+        return;
+      }
+    }
+
+    // ✅ NEW: Room capacity check
+    const cap = getRoomCapacity(selectedRoom.category);
+    const currentBedsInRoom = selectedRoom.beds?.length || 0;
+    if (cap !== Infinity && currentBedsInRoom + 1 > cap) {
+      alert(`${selectedRoom.category} room can have max ${cap} bed(s).`);
+      return;
+    }
+
+    try {
+      await axios.post(`${apiUrl}/${selectedRoom._id}/bed`, {
+        bedNo: bedForm.bedNo.trim(),
+        bedCategory: bedForm.bedCategory.trim(),
+        price: bedForm.price ? Number(bedForm.price) : null,
+      });
 
       fetchRooms();
       setShowAddBedModal(false);
@@ -353,61 +377,61 @@ if (firstBedNo) {
     }
   };
 
-const openEditModal = (roomId, roomNo, bedNo, bedCategory, currentPrice) => {
-  setEditTarget({
-    roomId,
-    roomNo,
-    bedNo: String(bedNo ?? ""),                 // ✅ correct identifier
-    bedCategory: bedCategory ?? "",             // ✅ Upper/Lower
-    price: currentPrice ?? "",
-  });
-  setShowEditModal(true);
-};
-
-
-const updateBedPrice = async () => {
-  const bedCategory = (editTarget.bedCategory || "").trim();
-
-  // ✅ price can be blank => clear (backend will set null)
-  let priceToSend = undefined;
-
-  if (editTarget.price === "") {
-    priceToSend = ""; // tells backend to clear price
-  } else {
-    const num = Number(editTarget.price);
-    if (Number.isNaN(num)) {
-      alert("Invalid price.");
-      return;
-    }
-    priceToSend = num;
-  }
-console.log("PUT URL =>", `${apiUrl}/${editTarget.roomId}/bed/${editTarget.bedNo}`);
-console.log("Payload =>", { price: priceToSend, bedCategory });
-
-  try {
-    await axios.put(`${apiUrl}/${editTarget.roomId}/bed/${editTarget.bedNo}`, {
-      price: priceToSend,
-      bedCategory, // ✅ NEW
+  const openEditModal = (roomId, roomNo, bedNo, bedCategory, currentPrice) => {
+    setEditTarget({
+      roomId,
+      roomNo,
+      bedNo: String(bedNo ?? ""),
+      bedCategory: bedCategory ?? "",
+      price: currentPrice ?? "",
     });
+    setShowEditModal(true);
+  };
 
-    setShowEditModal(false);
-    fetchRooms();
-  } catch (error) {
-    console.error("Error updating bed:", error);
-    alert(error?.response?.data?.message || "Failed to update bed.");
+  const updateBedPrice = async () => {
+    const bedCategory = (editTarget.bedCategory || "").trim();
 
-    console.log("STATUS:", error?.response?.status);
-    console.log("DATA:", error?.response?.data);
-    console.log("MSG:", error?.message);
-  }
-};
+    // price can be blank => clear (backend will set null)
+    let priceToSend = undefined;
 
+    if (editTarget.price === "") {
+      priceToSend = ""; // tells backend to clear price
+    } else {
+      const num = Number(editTarget.price);
+      if (Number.isNaN(num)) {
+        alert("Invalid price.");
+        return;
+      }
+      priceToSend = num;
+    }
 
-  /* -------- NEW: Delete bed operations -------- */
+    console.log("PUT URL =>", `${apiUrl}/${editTarget.roomId}/bed/${editTarget.bedNo}`);
+    console.log("Payload =>", { price: priceToSend, bedCategory });
+
+    try {
+      await axios.put(`${apiUrl}/${editTarget.roomId}/bed/${editTarget.bedNo}`, {
+        price: priceToSend,
+        bedCategory,
+      });
+
+      setShowEditModal(false);
+      fetchRooms();
+    } catch (error) {
+      console.error("Error updating bed:", error);
+      alert(error?.response?.data?.message || "Failed to update bed.");
+
+      console.log("STATUS:", error?.response?.status);
+      console.log("DATA:", error?.response?.data);
+      console.log("MSG:", error?.message);
+    }
+  };
+
+  /* -------- Delete bed operations -------- */
 
   const openDeleteBedModal = (room) => {
     const beds = room.beds || [];
     setDeleteBedState({
+      roomId: room._id, // ✅ NEW
       roomNo: room.roomNo,
       beds,
       selectedBedNo: beds[0]?.bedNo || "",
@@ -417,7 +441,7 @@ console.log("Payload =>", { price: priceToSend, bedCategory });
   };
 
   const handleDeleteBed = async () => {
-    const { roomNo, selectedBedNo, password } = deleteBedState;
+    const { selectedBedNo, password } = deleteBedState;
 
     if (!selectedBedNo) {
       alert("Please select a bed to delete.");
@@ -430,21 +454,22 @@ console.log("Payload =>", { price: priceToSend, bedCategory });
     }
 
     try {
-      await axios.delete(`${apiUrl}/${roomNo}/bed/${selectedBedNo}`);
+      // ✅ IMPORTANT: use roomId (consistent with add/update routes)
+      await axios.delete(`${apiUrl}/${deleteBedState.roomId}/bed/${selectedBedNo}`);
+
       setShowDeleteBedModal(false);
       setDeleteBedState({
+        roomId: "",
         roomNo: "",
         beds: [],
         selectedBedNo: "",
         password: "",
       });
+
       fetchRooms();
     } catch (err) {
       console.error("Failed to delete bed:", err.response?.data || err.message);
-      alert(
-        "Failed to delete bed: " +
-          (err.response?.data?.message || err.message || "")
-      );
+      alert("Failed to delete bed: " + (err.response?.data?.message || err.message || ""));
     }
   };
 
@@ -485,13 +510,6 @@ console.log("Payload =>", { price: priceToSend, bedCategory });
     zIndex: 1050,
   };
 
-  const remainingHint =
-    roomForm.category && floorKey
-      ? limitForFloor === undefined
-        ? "No limit configured for this floor."
-        : `Allowed: ${limitForFloor} • Used: ${currentCountOnFloor} • Remaining: ${remainingOnFloor}`
-      : "";
-
   const totalRooms = rooms.length;
   const totalBeds = rooms.reduce((sum, r) => sum + (r.beds?.length || 0), 0);
 
@@ -504,6 +522,7 @@ console.log("Payload =>", { price: priceToSend, bedCategory });
     }
 
     if (!q) return list;
+
     return list.filter((r) => {
       const inRoom = String(r.roomNo).toLowerCase().includes(q);
       const inFloor =
@@ -522,45 +541,41 @@ console.log("Payload =>", { price: priceToSend, bedCategory });
 
   const displayedRooms = baseFiltered;
 
+  /* -------- Quick edit room category -------- */
+  const editRoomCategoryQuick = async (room) => {
+    const current = (room.category || "").trim();
+    const next = window.prompt(`Edit Category for Room ${room.roomNo}`, current);
+
+    // user pressed Cancel
+    if (next === null) return;
+
+    const category = next.trim();
+    if (!category) {
+      alert("Category cannot be empty.");
+      return;
+    }
+
+    try {
+      // ✅ IMPORTANT: use room._id (not roomNo)
+      await axios.put(`${apiUrl}/${room._id}`, { category });
+
+      // optional: keep dropdown categories updated
+      setCategories((prev) =>
+        prev.some((c) => (c || "").trim().toLowerCase() === category.toLowerCase())
+          ? prev
+          : [...prev, category]
+      );
+
+      fetchRooms();
+    } catch (err) {
+      console.error("Failed to update room category:", err.response?.data || err.message);
+      alert(err.response?.data?.message || "Failed to update room category.");
+    }
+  };
+
   /* -------- JSX -------- */
-const editRoomCategoryQuick = async (room) => {
-  const current = (room.category || "").trim();
-  const next = window.prompt(
-    `Edit Category for Room ${room.roomNo}`,
-    current
-  );
-
-  // user pressed Cancel
-  if (next === null) return;
-
-  const category = next.trim();
-  if (!category) {
-    alert("Category cannot be empty.");
-    return;
-  }
-
-  try {
-    // ✅ IMPORTANT: use room._id (not roomNo)
-    await axios.put(`${apiUrl}/${room._id}`, { category });
-
-    // optional: keep dropdown categories updated
-    setCategories((prev) =>
-      prev.some((c) => (c || "").trim().toLowerCase() === category.toLowerCase())
-        ? prev
-        : [...prev, category]
-    );
-
-    fetchRooms();
-  } catch (err) {
-    console.error("Failed to update room category:", err.response?.data || err.message);
-    alert(err.response?.data?.message || "Failed to update room category.");
-  }
-};
   return (
-    <div
-      className="container-fluid px-3 px-md-4 py-3"
-      style={{ fontFamily: "Poppins, sans-serif" }}
-    >
+    <div className="container-fluid px-3 px-md-4 py-3" style={{ fontFamily: "Poppins, sans-serif" }}>
       <h3 className="fw-bold mb-3 mb-md-4">Room &amp; Bed Management</h3>
 
       {/* Toolbar */}
@@ -588,9 +603,7 @@ const editRoomCategoryQuick = async (room) => {
             <div className="w-100 d-md-none">
               <div className="d-flex align-items-center justify-content-between">
                 <h5 className="fw-bold mb-0">Manage Rooms</h5>
-                <span className="badge bg-light text-dark border">
-                  Rooms &amp; Beds
-                </span>
+                <span className="badge bg-light text-dark border">Rooms &amp; Beds</span>
               </div>
             </div>
 
@@ -618,97 +631,78 @@ const editRoomCategoryQuick = async (room) => {
       {/* Quick Add + KPIs */}
       <div className="row g-3 mb-4">
         {/* Quick Add */}
-      <div className="col-12 col-lg-6">
-  <div className="bg-white border rounded-3 shadow-sm p-3 h-100">
-    <h6 className="text-muted mb-2">Quick Add Room</h6>
+        <div className="col-12 col-lg-6">
+          <div className="bg-white border rounded-3 shadow-sm p-3 h-100">
+            <h6 className="text-muted mb-2">Quick Add Room</h6>
 
-    <div className="d-grid" style={{ gap: "8px" }}>
+            <div className="d-grid" style={{ gap: "8px" }}>
+              <input
+                type="text"
+                className="form-control form-control-sm"
+                placeholder="Category (Private / Double Sharing / 3 Sharing)"
+                value={roomForm.category}
+                onChange={(e) => setRoomForm((prev) => ({ ...prev, category: e.target.value }))}
+              />
 
-      <input
-        type="text"
-        className="form-control form-control-sm"
-        placeholder="Category (e.g., Deluxe, Standard)"
-        value={roomForm.category}
-        onChange={(e) =>
-          setRoomForm((prev) => ({ ...prev, category: e.target.value }))
-        }
-      />
+              <div>
+                <input
+                  type="text"
+                  className="form-control form-control-sm"
+                  placeholder="Floor No (Ground, 1, 2)"
+                  value={roomForm.floorNo}
+                  onChange={(e) => setRoomForm((prev) => ({ ...prev, floorNo: e.target.value }))}
+                />
+                {remainingHint && floorKey && (
+                  <small className="text-muted d-block mt-1 text-wrap">
+                    {roomForm.category && (
+                      <>
+                        {roomForm.category} • {floorLabelFromKey(floorKey)}:{" "}
+                      </>
+                    )}
+                    {remainingHint}
+                  </small>
+                )}
+              </div>
 
-      <div>
-        <input
-          type="text"
-          className="form-control form-control-sm"
-          placeholder="Floor No (e.g., Ground, 1, 2, 3, Basement)"
-          value={roomForm.floorNo}
-          onChange={(e) =>
-            setRoomForm((prev) => ({ ...prev, floorNo: e.target.value }))
-          }
-        />
-        {remainingHint && floorKey && (
-          <small className="text-muted d-block mt-1 text-wrap">
-            {roomForm.category && (
-              <>
-                {roomForm.category} • {floorLabelFromKey(floorKey)}:{" "}
-              </>
-            )}
-            {remainingHint}
-          </small>
-        )}
-      </div>
+              <input
+                className="form-control form-control-sm"
+                placeholder="Room No (e.g., 203)"
+                value={roomForm.roomNo}
+                onChange={(e) => setRoomForm((prev) => ({ ...prev, roomNo: e.target.value }))}
+              />
 
-      <input
-        className="form-control form-control-sm"
-        placeholder="Room No (e.g., 203)"
-        value={roomForm.roomNo}
-        onChange={(e) =>
-          setRoomForm((prev) => ({ ...prev, roomNo: e.target.value }))
-        }
-      />
+              <input
+                className="form-control form-control-sm"
+                placeholder="Bed No (e.g., B1)"
+                value={roomForm.bedNo}
+                onChange={(e) => setRoomForm((prev) => ({ ...prev, bedNo: e.target.value }))}
+              />
 
-      <input
-        className="form-control form-control-sm"
-        placeholder="Bed No (e.g., B1)"
-        value={roomForm.bedNo}
-        onChange={(e) =>
-          setRoomForm((prev) => ({ ...prev, bedNo: e.target.value }))
-        }
-      />
+              <input
+                className="form-control form-control-sm"
+                placeholder="Bed Category (e.g., Upper, Lower)"
+                value={roomForm.bedCategory}
+                onChange={(e) => setRoomForm((prev) => ({ ...prev, bedCategory: e.target.value }))}
+              />
 
-      <input
-        className="form-control form-control-sm"
-        placeholder="Bed Category (e.g., Upper, Lower)"
-        value={roomForm.bedCategory}
-        onChange={(e) =>
-          setRoomForm((prev) => ({ ...prev, bedCategory: e.target.value }))
-        }
-      />
+              <input
+                type="number"
+                className="form-control form-control-sm"
+                placeholder="Bed Price (₹)"
+                value={roomForm.bedPrice}
+                onChange={(e) => setRoomForm((prev) => ({ ...prev, bedPrice: e.target.value }))}
+              />
 
-      {/* ✅ NEW FIELD: BED PRICE */}
-      <input
-        type="number"
-        className="form-control form-control-sm"
-        placeholder="Bed Price (₹)"
-        value={roomForm.bedPrice}
-        onChange={(e) =>
-          setRoomForm((prev) => ({
-            ...prev,
-            bedPrice: e.target.value,
-          }))
-        }
-      />
-
-    <button
-  className="btn btn-sm px-3 text-white"
-  style={{ backgroundColor: "#5f7dfc" }}
-  onClick={addRoom}
->
-  Add
-</button>
-
-    </div>
-  </div>
-</div>
-
+              <button
+                className="btn btn-sm px-3 text-white"
+                style={{ backgroundColor: "#5f7dfc" }}
+                onClick={addRoom}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
 
         {/* KPI – Total Rooms */}
         <div className="col-6 col-md-6 col-lg-3">
@@ -747,10 +741,7 @@ const editRoomCategoryQuick = async (room) => {
       <div className="card shadow-sm">
         <div className="card-body">
           <div className="d-flex flex-wrap align-items-center justify-content-between mb-3 w-100">
-            <div
-              className="d-flex flex-wrap align-items-center gap-2 flex-shrink-0"
-              style={{ minWidth: 260 }}
-            >
+            <div className="d-flex flex-wrap align-items-center gap-2 flex-shrink-0" style={{ minWidth: 260 }}>
               <label className="form-label mb-0 me-2">Category</label>
               <select
                 className="form-select form-select-sm"
@@ -770,10 +761,7 @@ const editRoomCategoryQuick = async (room) => {
               Rooms &amp; Beds
             </h5>
 
-            <div
-              className="d-none d-md-block flex-shrink-0"
-              style={{ minWidth: 260, visibility: "hidden" }}
-            >
+            <div className="d-none d-md-block flex-shrink-0" style={{ minWidth: 260, visibility: "hidden" }}>
               spacer
             </div>
 
@@ -796,94 +784,81 @@ const editRoomCategoryQuick = async (room) => {
               <tbody>
                 {displayedRooms.map((room) => {
                   const norm = normalizeFloorKey(room.floorNo);
-                  const displayFloor = norm
-                    ? floorLabelFromKey(norm)
-                    : room.floorNo || "-";
+                  const displayFloor = norm ? floorLabelFromKey(norm) : room.floorNo || "-";
 
                   return (
-                 <tr
-  key={`${room.category}-${room.floorNo}-${room.roomNo}`}
-  style={{ backgroundColor: getRoomColor(room) }}
->
-<td className="fw-semibold">
-  {(() => {
-    const { bg, fg } = roomColors(room); // ✅ PASS room here
-    return (
-      <span className="roomNoPill" style={{ "--bg": bg, "--fg": fg }}>
-        {room.roomNo}
-      </span>
-    );
-  })()}
-</td>
+                    <tr
+                      key={`${room.category}-${room.floorNo}-${room.roomNo}`}
+                      style={{ backgroundColor: getRoomColor(room) }}
+                    >
+                      <td className="fw-semibold">
+                        {(() => {
+                          const { bg, fg } = roomColors(room);
+                          return (
+                            <span className="roomNoPill" style={{ "--bg": bg, "--fg": fg }}>
+                              {room.roomNo}
+                            </span>
+                          );
+                        })()}
+                      </td>
 
                       <td>{displayFloor}</td>
-                     <td>
-  <span
-    className="badge bg-light text-dark border"
-    role="button"
-    title="Click to edit category"
-    style={{ cursor: "pointer" }}
-    onClick={() => editRoomCategoryQuick(room)}
-  >
-    {room.category || "-"}
-  </span>
-</td>
 
                       <td>
-                        {(room.beds?.length ? room.beds : []).map(
-                          (bed, idx, arr) => {
-                            const isLast = idx === arr.length - 1;
-                            return (
-                              <div
-                                key={`${room.roomNo}-${bed.bedNo}-${idx}`}
-                                className="d-flex justify-content-between align-items-center py-1 flex-wrap"
-                                style={
-                                  !isLast
-                                    ? { borderBottom: "1px solid #9aa0a6" }
-                                    : {}
+                        <span
+                          className="badge bg-light text-dark border"
+                          role="button"
+                          title="Click to edit category"
+                          style={{ cursor: "pointer" }}
+                          onClick={() => editRoomCategoryQuick(room)}
+                        >
+                          {room.category || "-"}
+                        </span>
+                      </td>
+
+                      <td>
+                        {(room.beds?.length ? room.beds : []).map((bed, idx, arr) => {
+                          const isLast = idx === arr.length - 1;
+                          return (
+                            <div
+                              key={`${room.roomNo}-${bed.bedNo}-${idx}`}
+                              className="d-flex justify-content-between align-items-center py-1 flex-wrap"
+                              style={!isLast ? { borderBottom: "1px solid #9aa0a6" } : {}}
+                            >
+                              <div className="d-flex align-items-center gap-2 flex-wrap">
+                                <span className="badge rounded-pill bg-secondary">Bed {bed.bedNo}</span>
+                                {bed.bedCategory && (
+                                  <span className="badge rounded-pill bg-light text-dark border">
+                                    {bed.bedCategory}
+                                  </span>
+                                )}
+                                <small className="text-muted">
+                                  Price:{" "}
+                                  {bed.price != null
+                                    ? `₹${Number(bed.price).toLocaleString("en-IN")}`
+                                    : "—"}
+                                </small>
+                              </div>
+                              <button
+                                className="btn btn-sm btn-outline-primary ms-2"
+                                onClick={() =>
+                                  openEditModal(
+                                    room._id,
+                                    room.roomNo,
+                                    bed.bedNo,
+                                    bed.bedCategory ?? "",
+                                    bed.price ?? ""
+                                  )
                                 }
                               >
-                                <div className="d-flex align-items-center gap-2 flex-wrap">
-                                  <span className="badge rounded-pill bg-secondary">
-                                    Bed {bed.bedNo}
-                                  </span>
-                                  {bed.bedCategory && (
-                                    <span className="badge rounded-pill bg-light text-dark border">
-                                      {bed.bedCategory}
-                                    </span>
-                                  )}
-                                  <small className="text-muted">
-                                    Price:{" "}
-                                    {bed.price != null
-                                      ? `₹${Number(bed.price).toLocaleString(
-                                          "en-IN"
-                                        )}`
-                                      : "—"}
-                                  </small>
-                                </div>
-                                <button
-                                  className="btn btn-sm btn-outline-primary ms-2"
-                                 onClick={() =>
-  openEditModal(
-    room._id,
-    room.roomNo,
-    bed.bedNo,
-     bed.bedCategory ?? "",
-    bed.price ?? ""
-  )
-}
-
-                                >
-                                  Edit Price
-                                </button>
-                              </div>
-                            );
-                          }
-                        )}
-                        {!room.beds?.length && (
-                          <span className="text-muted">No beds yet</span>
-                        )}
+                                Edit Price
+                              </button>
+                            </div>
+                          );
+                        })}
+                        {!room.beds?.length && <span className="text-muted">No beds yet</span>}
                       </td>
+
                       <td>
                         <button
                           className="btn btn-sm"
@@ -893,22 +868,20 @@ const editRoomCategoryQuick = async (room) => {
                           + Add Bed
                         </button>
 
-                        {/* 🔴 NEW: one Delete Bed button per room */}
                         {room.beds?.length > 0 && (
- <button
-  className="btn btn-sm btn-outline-primary ms-2"
-  style={{ color: "#2ea3f2", borderColor: "#2ea3f2" }}
-  onClick={() => openDeleteBedModal(room)}
->
-  Delete Bed
-</button>
-
-
+                          <button
+                            className="btn btn-sm btn-outline-primary ms-2"
+                            style={{ color: "#2ea3f2", borderColor: "#2ea3f2" }}
+                            onClick={() => openDeleteBedModal(room)}
+                          >
+                            Delete Bed
+                          </button>
                         )}
                       </td>
                     </tr>
                   );
                 })}
+
                 {!displayedRooms.length && (
                   <tr>
                     <td colSpan={5} className="text-center text-muted py-4">
@@ -924,44 +897,20 @@ const editRoomCategoryQuick = async (room) => {
 
       {/* Add Bed Modal */}
       {showAddBedModal && selectedRoom && (
-        <div
-          style={modalBackdropStyle}
-          onClick={() => setShowAddBedModal(false)}
-        >
+        <div style={modalBackdropStyle} onClick={() => setShowAddBedModal(false)}>
           <div
             className="modal-dialog modal-dialog-centered"
-            style={{
-              width: "100%",
-              maxWidth: "560px",
-              margin: "0 12px",
-            }}
+            style={{ width: "100%", maxWidth: "560px", margin: "0 12px" }}
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
           >
-            <div
-              className="modal-content"
-              style={{
-                maxHeight: "calc(100vh - 24px)",
-                display: "flex",
-                flexDirection: "column",
-              }}
-            >
-              <div
-                className="modal-header bg-white sticky-top py-2"
-                style={{ zIndex: 1 }}
-              >
-                <h6 className="modal-title mb-0">
-                  Add Bed — Room {selectedRoom.roomNo}
-                </h6>
-               <button
-  type="button"
-  className="btn-close p-0"
-  onClick={() => setShowAddBedModal(false)}
->
-  x
-</button>
-
+            <div className="modal-content" style={{ maxHeight: "calc(100vh - 24px)", display: "flex", flexDirection: "column" }}>
+              <div className="modal-header bg-white sticky-top py-2" style={{ zIndex: 1 }}>
+                <h6 className="modal-title mb-0">Add Bed — Room {selectedRoom.roomNo}</h6>
+                <button type="button" className="btn-close p-0" onClick={() => setShowAddBedModal(false)}>
+                  x
+                </button>
               </div>
 
               <div className="modal-body py-2" style={{ overflowY: "auto" }}>
@@ -970,12 +919,7 @@ const editRoomCategoryQuick = async (room) => {
                   <input
                     className="form-control form-control-sm"
                     value={bedForm.bedNo}
-                    onChange={(e) =>
-                      setBedForm((prev) => ({
-                        ...prev,
-                        bedNo: e.target.value,
-                      }))
-                    }
+                    onChange={(e) => setBedForm((prev) => ({ ...prev, bedNo: e.target.value }))}
                     placeholder="e.g., B3"
                   />
                 </div>
@@ -985,12 +929,7 @@ const editRoomCategoryQuick = async (room) => {
                   <input
                     className="form-control form-control-sm"
                     value={bedForm.bedCategory}
-                    onChange={(e) =>
-                      setBedForm((prev) => ({
-                        ...prev,
-                        bedCategory: e.target.value,
-                      }))
-                    }
+                    onChange={(e) => setBedForm((prev) => ({ ...prev, bedCategory: e.target.value }))}
                     placeholder="e.g., Upper, Lower"
                   />
                 </div>
@@ -1005,34 +944,21 @@ const editRoomCategoryQuick = async (room) => {
                       type="number"
                       className="form-control"
                       value={bedForm.price}
-                      onChange={(e) =>
-                        setBedForm((prev) => ({
-                          ...prev,
-                          price: e.target.value,
-                        }))
-                      }
+                      onChange={(e) => setBedForm((prev) => ({ ...prev, price: e.target.value }))}
                       placeholder="e.g., 3500"
                       min="0"
                       inputMode="decimal"
                     />
                   </div>
-                  <small className="text-muted d-block mt-1">
-                    Enter amount in INR
-                  </small>
+                  <small className="text-muted d-block mt-1">Enter amount in INR</small>
                 </div>
               </div>
 
               <div className="modal-footer py-2 flex-wrap gap-2">
-                <button
-                  className="btn btn-secondary w-100 w-sm-auto"
-                  onClick={() => setShowAddBedModal(false)}
-                >
+                <button className="btn btn-secondary w-100 w-sm-auto" onClick={() => setShowAddBedModal(false)}>
                   Cancel
                 </button>
-                <button
-                  className="btn btn-success w-100 w-sm-auto"
-                  onClick={addBedToRoom}
-                >
+                <button className="btn btn-success w-100 w-sm-auto" onClick={addBedToRoom}>
                   Save Bed
                 </button>
               </div>
@@ -1043,93 +969,56 @@ const editRoomCategoryQuick = async (room) => {
 
       {/* Edit Price Modal */}
       {showEditModal && (
-        <div
-          style={modalBackdropStyle}
-          onClick={() => setShowEditModal(false)}
-        >
+        <div style={modalBackdropStyle} onClick={() => setShowEditModal(false)}>
           <div
             className="modal-dialog modal-dialog-centered"
-            style={{
-              width: "100%",
-              maxWidth: "520px",
-              margin: "0 12px",
-            }}
+            style={{ width: "100%", maxWidth: "520px", margin: "0 12px" }}
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
           >
-            <div
-              className="modal-content"
-              style={{
-                maxHeight: "calc(100vh - 24px)",
-                display: "flex",
-                flexDirection: "column",
-              }}
-            >
-              <div
-                className="modal-header bg-white sticky-top py-2"
-                style={{ zIndex: 1 }}
-              >
+            <div className="modal-content" style={{ maxHeight: "calc(100vh - 24px)", display: "flex", flexDirection: "column" }}>
+              <div className="modal-header bg-white sticky-top py-2" style={{ zIndex: 1 }}>
                 <h6 className="modal-title mb-0">
-                 Edit Bed — Room {editTarget.roomNo} • Category {editTarget.bedCategory || "-"}
-
+                  Edit Bed — Room {editTarget.roomNo} • Category {editTarget.bedCategory || "-"}
                 </h6>
-             <button
-  type="button"
-  className="btn-close p-0"
-  onClick={() => setShowEditModal(false)}
->
-  x
-</button>
-
+                <button type="button" className="btn-close p-0" onClick={() => setShowEditModal(false)}>
+                  x
+                </button>
               </div>
 
-             <div className="modal-body py-2" style={{ overflowY: "auto" }}>
-<div className="mb-2">
-  <label className="form-label mb-1">Bed Category</label>
-  <input
-    type="text"
-    className="form-control form-control-sm"
-    value={editTarget.bedCategory}
-    onChange={(e) =>
-      setEditTarget((t) => ({ ...t, bedCategory: e.target.value }))
-    }
-    placeholder="Upper / Lower"
-  />
-</div>
+              <div className="modal-body py-2" style={{ overflowY: "auto" }}>
+                <div className="mb-2">
+                  <label className="form-label mb-1">Bed Category</label>
+                  <input
+                    type="text"
+                    className="form-control form-control-sm"
+                    value={editTarget.bedCategory}
+                    onChange={(e) => setEditTarget((t) => ({ ...t, bedCategory: e.target.value }))}
+                    placeholder="Upper / Lower"
+                  />
+                </div>
 
-
-
-  {/* ✅ Price */}
-  <label className="form-label mb-1">Price</label>
-  <div className="input-group input-group-sm">
-    <span className="input-group-text">₹</span>
-    <input
-      type="number"
-      className="form-control"
-      value={editTarget.price}
-      onChange={(e) =>
-        setEditTarget((t) => ({ ...t, price: e.target.value }))
-      }
-      min="0"
-      inputMode="decimal"
-      placeholder="e.g., 3500"
-    />
-  </div>
-</div>
-
+                <label className="form-label mb-1">Price</label>
+                <div className="input-group input-group-sm">
+                  <span className="input-group-text">₹</span>
+                  <input
+                    type="number"
+                    className="form-control"
+                    value={editTarget.price}
+                    onChange={(e) => setEditTarget((t) => ({ ...t, price: e.target.value }))}
+                    min="0"
+                    inputMode="decimal"
+                    placeholder="e.g., 3500"
+                  />
+                </div>
+              </div>
 
               <div className="modal-footer py-2 flex-wrap gap-2">
-                <button
-                  className="btn btn-secondary w-100 w-sm-auto"
-                  onClick={() => setShowEditModal(false)}
-                >
+                <button className="btn btn-secondary w-100 w-sm-auto" onClick={() => setShowEditModal(false)}>
                   Cancel
                 </button>
-                <button
-                  className="btn btn-primary w-100 w-sm-auto"
-                  onClick={updateBedPrice}
-                >
+                <button className="btn btn-primary w-100 w-sm-auto" onClick={updateBedPrice}>
                   Save
                 </button>
               </div>
@@ -1138,46 +1027,22 @@ const editRoomCategoryQuick = async (room) => {
         </div>
       )}
 
-      {/* 🔴 NEW: Delete Bed Modal */}
+      {/* Delete Bed Modal */}
       {showDeleteBedModal && (
-        <div
-          style={modalBackdropStyle}
-          onClick={() => setShowDeleteBedModal(false)}
-        >
+        <div style={modalBackdropStyle} onClick={() => setShowDeleteBedModal(false)}>
           <div
             className="modal-dialog modal-dialog-centered"
-            style={{
-              width: "100%",
-              maxWidth: "520px",
-              margin: "0 12px",
-            }}
+            style={{ width: "100%", maxWidth: "520px", margin: "0 12px" }}
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
           >
-            <div
-              className="modal-content"
-              style={{
-                maxHeight: "calc(100vh - 24px)",
-                display: "flex",
-                flexDirection: "column",
-              }}
-            >
-              <div
-                className="modal-header bg-white sticky-top py-2"
-                style={{ zIndex: 1 }}
-              >
-                <h6 className="modal-title mb-0">
-                  Delete Bed — Room {deleteBedState.roomNo}
-                </h6>
-               <button
-  type="button"
-  className="btn-close p-0"
-  onClick={() => setShowDeleteBedModal(false)}
->
-  x
-</button>
-
+            <div className="modal-content" style={{ maxHeight: "calc(100vh - 24px)", display: "flex", flexDirection: "column" }}>
+              <div className="modal-header bg-white sticky-top py-2" style={{ zIndex: 1 }}>
+                <h6 className="modal-title mb-0">Delete Bed — Room {deleteBedState.roomNo}</h6>
+                <button type="button" className="btn-close p-0" onClick={() => setShowDeleteBedModal(false)}>
+                  x
+                </button>
               </div>
 
               <div className="modal-body py-2" style={{ overflowY: "auto" }}>
@@ -1204,9 +1069,7 @@ const editRoomCategoryQuick = async (room) => {
                 </div>
 
                 <div className="mb-2">
-                  <label className="form-label mb-1">
-                    Password (required to delete)
-                  </label>
+                  <label className="form-label mb-1">Password (required to delete)</label>
                   <input
                     type="password"
                     className="form-control form-control-sm"
@@ -1219,7 +1082,6 @@ const editRoomCategoryQuick = async (room) => {
                     }
                     placeholder="Enter password"
                   />
-               
                 </div>
 
                 <div className="alert alert-warning small mt-2">
@@ -1228,16 +1090,10 @@ const editRoomCategoryQuick = async (room) => {
               </div>
 
               <div className="modal-footer py-2 flex-wrap gap-2">
-                <button
-                  className="btn btn-secondary w-100 w-sm-auto"
-                  onClick={() => setShowDeleteBedModal(false)}
-                >
+                <button className="btn btn-secondary w-100 w-sm-auto" onClick={() => setShowDeleteBedModal(false)}>
                   Cancel
                 </button>
-                <button
-                  className="btn btn-danger w-100 w-sm-auto"
-                  onClick={handleDeleteBed}
-                >
+                <button className="btn btn-danger w-100 w-sm-auto" onClick={handleDeleteBed}>
                   Delete Bed
                 </button>
               </div>
@@ -1257,36 +1113,22 @@ const editRoomCategoryQuick = async (room) => {
             aria-modal="true"
           >
             <div className="modal-content">
-              <div
-                className="modal-header sticky-top bg-white"
-                style={{ zIndex: 1 }}
-              >
+              <div className="modal-header sticky-top bg-white" style={{ zIndex: 1 }}>
                 <h5 className="modal-title">Edit Category Names</h5>
-                <button
-  type="button"
-  className="btn-close p-0"
-  onClick={() => setShowCatEditor(false)}
->
-  x
-</button>
-
+                <button type="button" className="btn-close p-0" onClick={() => setShowCatEditor(false)}>
+                  x
+                </button>
               </div>
 
-              <div
-                className="modal-body p-3"
-                style={{ maxHeight: "70vh", overflow: "auto" }}
-              >
+              <div className="modal-body p-3" style={{ maxHeight: "70vh", overflow: "auto" }}>
                 <div className="alert alert-info small">
-                  Order matters: limits are tied to index (0–
-                  {DEFAULT_CATEGORIES.length - 1}).
+                  You have {DEFAULT_CATEGORIES.length} categories.
                 </div>
 
                 <div className="row g-2">
                   {catDrafts.map((val, idx) => (
                     <div className="col-12 col-md-6" key={idx}>
-                      <label className="form-label small">
-                        Category {idx + 1}
-                      </label>
+                      <label className="form-label small">Category {idx + 1}</label>
                       <input
                         className="form-control form-control-sm"
                         value={val}
@@ -1304,22 +1146,13 @@ const editRoomCategoryQuick = async (room) => {
               </div>
 
               <div className="modal-footer flex-wrap gap-2">
-                <button
-                  className="btn btn-outline-secondary"
-                  onClick={resetDefaultCategories}
-                >
+                <button className="btn btn-outline-secondary" onClick={resetDefaultCategories}>
                   Reset Defaults
                 </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => setShowCatEditor(false)}
-                >
+                <button className="btn btn-secondary" onClick={() => setShowCatEditor(false)}>
                   Cancel
                 </button>
-                <button
-                  className="btn btn-success"
-                  onClick={saveCategoryNames}
-                >
+                <button className="btn btn-success" onClick={saveCategoryNames}>
                   Save Categories
                 </button>
               </div>

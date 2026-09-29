@@ -38,6 +38,7 @@ import RoomManager from './componenet/RoomManager';
 import FormSubmitted from './componenet/FormSubmitted';
 import OtherExpense from "./Pages/OtherExpense";
 import LightBill from "./Pages/LightBill";
+import TenantHolidayManagement from "./Pages/TenantHolidayManagement";
 // ✅ Import your tenant app (the module you shared at top)
 import TenantApp from './tenant/TenantApp';
 
@@ -101,6 +102,7 @@ function Layout() {
 
         <Route path="/other-expense" element={<OtherExpense />} />
 <Route path="/light-bill" element={<LightBill />} />
+<Route path="/tenant-holiday-management" element={<TenantHolidayManagement />} />
       </Routes>
 
       {shouldShowSidebar && (
@@ -114,7 +116,7 @@ function Layout() {
 
 function App() {
   return (
-    <BrowserRouter basename="/mutakegirlshostel">
+    <BrowserRouter basename="/vrundahostel">
       <Layout />
     </BrowserRouter>
   );

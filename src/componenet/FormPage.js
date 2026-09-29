@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { FaUser, FaLock } from 'react-icons/fa';
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faUserPlus } from "@fortawesome/free-solid-svg-icons";
-import logo from '../image/mutkehostel.png'
+import logo from '../image/vrundaLogohttp://localhost:8000'
 
 import '../stylecss/LoginRegister.css';
 
@@ -220,3 +220,4 @@ const FormPage = () => {
 };
 
 export default FormPage;
+

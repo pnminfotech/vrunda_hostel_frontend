@@ -8,6 +8,9 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faSignOutAlt } from "@fortawesome/free-solid-svg-icons";
 import React, { useState, useEffect, useRef , useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import * as XLSX from "xlsx";
+import { FaDownload } from "react-icons/fa";
+import { FiDownload } from "react-icons/fi";
 
 const COLORS = ['#1e3a8a', '#FBBF24', '#3B82F6', '#10B981', '#EF4444', '#6366F1'];
 
@@ -45,6 +48,12 @@ const [showFutureLeaveModal, setShowFutureLeaveModal] = useState(false);
 
 const [rooms, setRooms] = useState([]);
 const [tenantsState, setTenantsState] = useState([]);
+const [archivedTenants, setArchivedTenants] = useState([]);
+const [categoryReportMonth, setCategoryReportMonth] = useState(() => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+});
+
 
 
 const futureLeaveTenants = useMemo(() => {
@@ -181,6 +190,266 @@ const calculatePendingRent = (tenant) => {
 };
 
 
+const toNum = (v) => {
+  if (v === null || v === undefined) return 0;
+  const n = Number(String(v).replace(/[,₹\s]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+};
+
+  const norm = (s) => String(s ?? "").trim().toLowerCase();
+
+  const getMonthRange = (ym) => {
+    const safeYm = /^\d{4}-\d{2}$/.test(String(ym)) ? String(ym) : null;
+    const now = new Date();
+    const [y, m] = safeYm
+      ? safeYm.split("-").map(Number)
+      : [now.getFullYear(), now.getMonth() + 1];
+    const monthStart = new Date(y, m - 1, 1, 0, 0, 0, 0);
+    const monthEnd = new Date(y, m, 0, 23, 59, 59, 999);
+    const label = `${y}-${String(m).padStart(2, "0")}`;
+    return { monthStart, monthEnd, label };
+  };
+
+  const safeDate = (v) => {
+    const d = new Date(v);
+    return isNaN(d) ? null : d;
+  };
+
+  const isActiveInMonth = (t, monthStart, monthEnd) => {
+    const join = safeDate(t?.joiningDate);
+    if (join && join > monthEnd) return false;
+    const leave = safeDate(t?.leaveDate);
+    if (leave && leave < monthStart) return false;
+    return true;
+  };
+
+
+
+
+
+// ✅ Category report download (same columns as your image)
+  const handleDownloadCategoryReport = (ym = categoryReportMonth) => {
+    const { monthStart, monthEnd, label } = getMonthRange(ym);
+    const monthLabel = monthStart.toLocaleString(undefined, { month: "short" }) + "-" + monthStart.getFullYear();
+
+    const monthIdx = (mon) => {
+      const key = String(mon || "").trim().slice(0, 3).toLowerCase();
+      const arr = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+      const i = arr.indexOf(key);
+      return i >= 0 ? i : null;
+    };
+
+      const getRentYMLocal = (r) => {
+        if (!r) return null;
+        if (r.rentMonthYM && typeof r.rentMonthYM === "object") {
+          const y = Number(r.rentMonthYM.y);
+          const rawM = Number(r.rentMonthYM.m);
+          if (Number.isFinite(y) && Number.isFinite(rawM)) {
+            // Accept both 0-based (0..11) and 1-based (1..12) month storage.
+            const m = rawM >= 1 && rawM <= 12 ? rawM - 1 : rawM;
+            if (m >= 0 && m <= 11) return { y, m };
+          }
+        }
+        if (r.month) {
+          const s = String(r.month).trim();
+        if (/^\d{4}-\d{1,2}$/.test(s)) {
+          const [yy, mm] = s.split("-").map(Number);
+          return { y: yy, m: mm - 1 };
+        }
+        const parts = s.split("-");
+        if (parts.length === 2) {
+          const m = monthIdx(parts[0]);
+          if (m !== null) {
+            const yRaw = String(parts[1]).trim();
+            const y = yRaw.length === 2 ? Number("20" + yRaw) : Number(yRaw);
+            if (Number.isFinite(y)) return { y, m };
+          }
+        }
+      }
+      if (r.date) {
+        const d = new Date(r.date);
+        if (!isNaN(d)) return { y: d.getFullYear(), m: d.getMonth() };
+      }
+      return null;
+    };
+
+      const getPaidAmtLocal = (r) =>
+        toNum(r?.rentAmount ?? r?.paidAmount ?? r?.amount ?? r?.paid ?? 0);
+
+      const getTenantCategory = (t) => {
+        const direct = String(t?.category || "").trim();
+        if (direct) return direct;
+        const roomByBed = (rooms || []).find((rm) => {
+          const sameRoom = String(rm?.roomNo || "").trim() === String(t?.roomNo || "").trim();
+          if (!sameRoom) return false;
+          return (rm?.beds || []).some(
+            (b) =>
+              String(b?.bedNo || "").trim().toLowerCase() ===
+              String(t?.bedNo || "").trim().toLowerCase()
+          );
+        });
+        if (roomByBed?.category) return String(roomByBed.category).trim();
+        const roomByNo = (rooms || []).find(
+          (rm) => String(rm?.roomNo || "").trim() === String(t?.roomNo || "").trim()
+        );
+        return String(roomByNo?.category || "").trim();
+      };
+  // 1) TOTAL CAPACITY by category from rooms (count beds)
+  const capMap = new Map();
+  (rooms || []).forEach((room) => {
+    const cat = String(room?.category || "").trim();
+    const beds = Array.isArray(room?.beds) ? room.beds.length : 0;
+    if (!cat) return;
+    capMap.set(cat, (capMap.get(cat) || 0) + beds);
+  });
+
+    // 3) Find tenant monthly rent (baseRent -> rentAmount -> bed.price)
+  const getTenantMonthlyRent = (t) => {
+    const r = Number(t?.baseRent || t?.rentAmount || 0);
+    if (r > 0) return r;
+
+    const room = (rooms || []).find(
+      (rm) =>
+        String(rm?.roomNo || "").trim() === String(t?.roomNo || "").trim() &&
+        norm(rm?.category) === norm(getTenantCategory(t))
+    );
+
+    const bed = (room?.beds || []).find(
+      (b) =>
+        String(b?.bedNo || "").trim().toLowerCase() ===
+        String(t?.bedNo || "").trim().toLowerCase()
+    );
+
+    return Number(bed?.price || 0);
+  };
+
+  // 4) Occupied + Deposit + Monthly Rent sums by category
+  const occMap = new Map();
+  const depMap = new Map();
+  const rentMap = new Map();
+  const receivedMap = new Map();
+  const receivedKey = `RECEIVED AMT (${monthLabel})`;
+
+      const receivedTenantPool = [...(tenantsState || []), ...(archivedTenants || [])];
+      receivedTenantPool.forEach((t) => {
+      const cat = getTenantCategory(t);
+      if (!cat) return;
+
+      // Include current-month received amounts even for tenants who already left.
+      const receivedThisMonth = (t.rents || []).reduce((sum, r) => {
+        const ym = getRentYMLocal(r);
+        if (!ym) return sum;
+        if (ym.y === monthStart.getFullYear() && ym.m === monthStart.getMonth()) {
+          const remaining = toNum(r?.balanceAmount ?? r?.remainingAmount ?? r?.dueAmount ?? r?.pendingAmount ?? 0);
+          if (remaining > 0) return sum;
+          return sum + getPaidAmtLocal(r);
+        }
+        return sum;
+      }, 0);
+      receivedMap.set(cat, (receivedMap.get(cat) || 0) + receivedThisMonth);
+      });
+
+      (tenantsState || []).forEach((t) => {
+      const cat = getTenantCategory(t);
+      if (!cat) return;
+        if (!isActiveInMonth(t, monthStart, monthEnd)) return;
+
+      occMap.set(cat, (occMap.get(cat) || 0) + 1);
+      depMap.set(cat, (depMap.get(cat) || 0) + toNum(t?.depositAmount));
+
+      const tenantMonthlyRent = getTenantMonthlyRent(t);
+      rentMap.set(cat, (rentMap.get(cat) || 0) + toNum(tenantMonthlyRent));
+      });
+
+    // 5) Build category list
+    const cats = Array.from(
+      new Set([...capMap.keys(), ...occMap.keys(), ...rentMap.keys(), ...receivedMap.keys()])
+    ).sort((a, b) => a.localeCompare(b));
+
+  // 6) Rows (same columns like your image)
+  const rows = cats.map((cat, i) => {
+    const totalCapacity = capMap.get(cat) || 0;
+    const totalOccupied = occMap.get(cat) || 0;
+    const vacantBed = Math.max(0, totalCapacity - totalOccupied);
+
+    return {
+      "SR NO": i + 1,
+      "LOCATION": cat,
+      "TOTAL CAPACITY": totalCapacity,
+      "TOTAL Occupied": totalOccupied,
+      "VACANT BED": vacantBed,
+      "DEPOSITE AMT": depMap.get(cat) || 0,
+      "BALANCE AMT (Deposit)": "",
+      "RENT AMT": rentMap.get(cat) || 0,
+      [receivedKey]: receivedMap.get(cat) || 0,
+      "BALANCE AMT (Rent)": "",
+      "REMARK": "",
+    };
+  });
+
+  // 7) Totals row
+  const totals = rows.reduce(
+    (a, r) => {
+      a["TOTAL CAPACITY"] += Number(r["TOTAL CAPACITY"]) || 0;
+      a["TOTAL Occupied"] += Number(r["TOTAL Occupied"]) || 0;
+      a["VACANT BED"] += Number(r["VACANT BED"]) || 0;
+      a["DEPOSITE AMT"] += Number(r["DEPOSITE AMT"]) || 0;
+      a["RENT AMT"] += Number(r["RENT AMT"]) || 0;
+      a[receivedKey] += Number(r[receivedKey]) || 0;
+      return a;
+    },
+    {
+      "SR NO": "",
+      "LOCATION": "TOTAL",
+      "TOTAL CAPACITY": 0,
+      "TOTAL Occupied": 0,
+      "VACANT BED": 0,
+      "DEPOSITE AMT": 0,
+      "BALANCE AMT (Deposit)": "",
+      "RENT AMT": 0,
+      [receivedKey]: 0,
+      "BALANCE AMT (Rent)": "",
+      "REMARK": "",
+    }
+  );
+
+  rows.push(totals);
+
+  // 8) Export Excel
+  const ws = XLSX.utils.json_to_sheet(rows, { skipHeader: false });
+  ws["!cols"] = [
+    { wch: 7 },
+    { wch: 28 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 20 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 22 },
+    { wch: 20 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Category Report");
+
+    XLSX.writeFile(wb, `Category_Report_${label}.xlsx`);
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const [showPendingRentModal, setShowPendingRentModal] = useState(false);
 const [pendingRentList, setPendingRentList] = useState([]);
@@ -194,10 +463,7 @@ const [pendingRentList, setPendingRentList] = useState([]);
 const findVacantBeds = () => {
   if (!rooms.length) return;
 
-  // Normalize all occupied bed numbers
-  const occupiedBeds = new Set(
-    tenantsState.map(t => String(t.bedNo).trim().toLowerCase())
-  );
+  const occupiedBeds = buildOccupiedBedKeySet(tenantsState, rooms);
 
   let vacants = [];
 
@@ -205,7 +471,7 @@ const findVacantBeds = () => {
     const seen = new Set(); // avoid duplicate beds in DB
 
     (room.beds || []).forEach(bed => {
-      const bedKey = String(bed.bedNo).trim().toLowerCase();
+      const bedKey = makeBedKey(room?.roomNo, bed?.bedNo);
 
       if (seen.has(bedKey)) return;  // skip duplicate DB entry
       seen.add(bedKey);
@@ -222,22 +488,116 @@ const findVacantBeds = () => {
     });
   });
 
+  vacants.sort((a, b) => {
+    const r = String(a.roomNo).localeCompare(String(b.roomNo), undefined, { numeric: true });
+    if (r !== 0) return r;
+    return String(a.bedNo).localeCompare(String(b.bedNo), undefined, { numeric: true });
+  });
+
   setVacantBedsList(vacants);
   setShowVacantModal(true);
 };
 
 
+
+
+
+const monthIdx = (mon) => {
+  const key = String(mon || "").trim().slice(0, 3).toLowerCase();
+  const arr = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+  const i = arr.indexOf(key);
+  return i >= 0 ? i : null;
+};
+
+const getRentYM = (r) => {
+  if (!r) return null;
+
+  // 1) month like "Jan-26", "Jan-2026", "2026-01"
+  if (r.month) {
+    const s = String(r.month).trim();
+
+    // "2026-01"
+    if (/^\d{4}-\d{1,2}$/.test(s)) {
+      const [yy, mm] = s.split("-").map(Number);
+      return { y: yy, m: mm - 1 };
+    }
+
+    // "Jan-26" or "Jan-2026"
+    const parts = s.split("-");
+    if (parts.length === 2) {
+      const m = monthIdx(parts[0]);
+      if (m !== null) {
+        const yRaw = String(parts[1]).trim();
+        const y = yRaw.length === 2 ? Number("20" + yRaw) : Number(yRaw);
+        if (Number.isFinite(y)) return { y, m };
+      }
+    }
+  }
+
+  // 2) date field
+  if (r.date) {
+    const d = new Date(r.date);
+    if (!isNaN(d)) return { y: d.getFullYear(), m: d.getMonth() };
+  }
+
+  return null;
+};
+
+const getPaidAmt = (r) =>
+  toNum(r?.rentAmount ?? r?.paidAmount ?? r?.amount ?? r?.paid ?? 0);
+
+const isActiveTenant = (t) => {
+  if (!t?.leaveDate) return true;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const leave = new Date(t.leaveDate); leave.setHours(0,0,0,0);
+  return leave > today; // future leave => still active
+};
+
+const normalizeKeyPart = (v) => String(v ?? "").trim().toLowerCase();
+const makeBedKey = (roomNo, bedNo) => `${normalizeKeyPart(roomNo)}__${normalizeKeyPart(bedNo)}`;
+
+const getTenantRoomNo = (tenant, roomsList = []) => {
+  const directRoomNo = String(tenant?.roomNo ?? "").trim();
+  if (directRoomNo) return directRoomNo;
+
+  const rid = tenant?.roomId?._id || tenant?.roomId || tenant?.room?._id || tenant?.room;
+  if (!rid) return "";
+
+  const matchedRoom = (roomsList || []).find((r) => String(r?._id) === String(rid));
+  return String(matchedRoom?.roomNo ?? "").trim();
+};
+
+const buildOccupiedBedKeySet = (tenants = [], roomsList = []) => {
+  const set = new Set();
+
+  (tenants || []).forEach((t) => {
+    if (!isActiveTenant(t)) return;
+
+    const roomNo = getTenantRoomNo(t, roomsList);
+    const bedNo = String(t?.bedNo ?? "").trim();
+    if (!roomNo || !bedNo) return;
+
+    set.add(makeBedKey(roomNo, bedNo));
+  });
+
+  return set;
+};
+
 useEffect(() => {
-  Promise.all([
-    fetch(' http://localhost:8000/api/').then(res => res.json()),
-    fetch(' http://localhost:8000/api/light-bill/all').then(res => res.json()),
-    fetch(' http://localhost:8000/api/other-expense/all').then(res => res.json()),
-    fetch(' http://localhost:8000/api/rooms').then(res => res.json()),
-  ]).then(([tenants, lightBills, otherExpenses, rooms]) => {
+    Promise.all([
+      fetch('http://localhost:8000/api/').then(res => res.json()),
+      fetch('http://localhost:8000/api/light-bill/all').then(res => res.json()),
+      fetch('http://localhost:8000/api/other-expense/all').then(res => res.json()),
+      fetch('http://localhost:8000/api/rooms').then(res => res.json()),
+      fetch('http://localhost:8000/api/forms/archived')
+        .then(res => (res.ok ? res.json() : []))
+        .catch(() => []),
+    ]).then(([tenants, lightBills, otherExpenses, rooms, archived]) => {
 
     // ✅ ADD THESE TWO LINES EXACTLY HERE
-    setRooms(rooms);
-    setTenantsState(tenants);
+      setRooms(rooms);
+      setTenantsState(tenants);
+      setArchivedTenants(Array.isArray(archived) ? archived : []);
 
 
     // -------------------------------------------------------
@@ -248,11 +608,9 @@ useEffect(() => {
       0
     );
 
-const occupied = tenants
-  .filter(t => !t.leaveDate && t.bedNo)
-  .length;
+const occupied = buildOccupiedBedKeySet(tenants, rooms).size;
 
-    const vacant = totalBeds - occupied;
+    const vacant = Math.max(0, totalBeds - occupied);
 
     const deposits = tenants.filter(t => Number(t.depositAmount) > 0).length;
 
@@ -307,47 +665,24 @@ const occupied = tenants
 
 
 
-
-
-const pendingRentList = tenants.filter(t => {
-  if (t.leaveDate) return false;
-  if (!t.bedNo) return false;
+const pendingList = tenants.filter((t) => {
+  if (!isActiveTenant(t)) return false;
+  if (t.bedNo === null || t.bedNo === undefined || String(t.bedNo).trim() === "") return false;
 
   const rents = t.rents || [];
 
-  const paidThisMonth = rents.some(r => {
-    if (!r) return false;
-
-    if (r.month) {
-      try {
-        const [mon, yy] = r.month.split("-");
-        const year = Number("20" + yy);
-        const month = new Date(`${mon} 1, ${year}`).getMonth();
-        return (
-          year === Y &&
-          month === M &&
-          Number(r.rentAmount) > 0
-        );
-      } catch {}
-    }
-
-    if (r.date) {
-      const d = new Date(r.date);
-      return (
-        d.getFullYear() === Y &&
-        d.getMonth() === M &&
-        Number(r.rentAmount) > 0
-      );
-    }
-
-    return false;
+  const paidThisMonth = rents.some((r) => {
+    const ym = getRentYM(r);
+    if (!ym) return false;
+    return ym.y === Y && ym.m === M && getPaidAmt(r) > 0;  // ✅ robust
   });
 
   return !paidThisMonth;
 });
 
-const pendingRents = pendingRentList.length;
-setPendingRentList(pendingRentList);
+
+const pendingRents = pendingList.length;
+setPendingRentList(pendingList);
 
 
 
@@ -499,6 +834,15 @@ setPendingRentList(pendingRentList);
       {/* Topbar */}
       <style>{`
         .md-topbar { display:none; }
+        .category-report-controls .category-report-month {
+          width: 135px;
+        }
+        .category-report-controls .category-report-download-btn {
+          width: 36px;
+          height: 32px;
+          padding: 0;
+          flex-shrink: 0;
+        }
         @media (max-width: 991.98px){
           .md-topbar{
             display:flex;
@@ -525,6 +869,23 @@ setPendingRentList(pendingRentList);
           main.md-shell{
             margin-left: 0 !important;
             padding-top: 72px !important;
+          }
+        }
+        @media (max-width: 575.98px){
+          .category-report-controls{
+            flex-direction: column;
+            align-items: stretch !important;
+            gap: 0px !important;
+            width: 100%;
+          }
+          .category-report-controls .category-report-month{
+            width: 100% !important;
+            min-width: 0;
+          }
+          .category-report-controls .category-report-download-btn{
+            width: 27% !important;
+            height: 32px;
+            margin-left:42px;
           }
         }
       `}</style>
@@ -594,7 +955,63 @@ setPendingRentList(pendingRentList);
           {/* {renderCard('Deposit Leaving Tenants', summary.rent.deposits || 0, '#acddaf', <FiBarChart2 />)} */}
           {renderCard('Light Bill Paid', `₹${summary.light.paid || 0}`, '#7897af', <MdLightbulbOutline />)}
           {renderCard('Light Bill Pending', `₹${summary.light.pending || 0}`, '#f5d4a0', <MdLightbulbOutline />)}
-          {renderCard('Maintenance Paid', `₹${summary.maintenance.paid || 0}`, '#cebaed', <MdOutlineReceiptLong />)}
+          <div className="col-6 col-md-4 col-lg-3 mb-2">
+            <div
+  className="card border-0 shadow-sm h-100"
+  style={{
+    backgroundColor: "#cebaed",
+    borderRadius: "12px",
+   
+  }}
+>
+  <div className="card-body text-center p-2">
+    <div className="fs-5 mb-1">
+      <MdOutlineReceiptLong />
+    </div>
+
+    <div
+      className="small text-uppercase text-muted"
+      style={{ fontSize: "0.75rem" }}
+    >
+      Category Report
+    </div>
+
+    {/* optional label */}
+    {/* <div className="fw-semibold" style={{ fontSize: "1rem" }}>
+      Download
+    </div> */}
+
+    {/* ✅ month + icon button in same line */}
+    <div className="mt-2 d-flex align-items-center justify-content-center gap-2 category-report-controls">
+      <input
+        type="month"
+        className="form-control form-control-sm category-report-month"
+        value={categoryReportMonth}
+        onChange={(e) => setCategoryReportMonth(e.target.value)}
+      />
+
+      <button
+        type="button"
+        className="btn btn-sm btn-primary d-inline-flex align-items-center justify-content-center category-report-download-btn"
+        onClick={() => handleDownloadCategoryReport(categoryReportMonth)}
+        title="Download"
+      >
+        <FiDownload size={16} />
+      </button>
+    </div>
+  </div>
+</div>
+
+          </div>
+ {false && renderCard(
+  "Category Report",
+  "Download",
+  "#cebaed",
+  <MdOutlineReceiptLong />,
+  handleDownloadCategoryReport   // ✅ clicking anywhere on card downloads
+)}
+
+
           {renderCard('Maintenance Pending', `₹${summary.maintenance.pending || 0}`, '#afe6f3', <MdOutlineReceiptLong />)}
         </section>
 
@@ -646,12 +1063,13 @@ setPendingRentList(pendingRentList);
       <div className="modal-content">
         <div className="modal-header">
           <h5 className="modal-title">Vacant Beds</h5>
-          <button
+         <button
   type="button"
-  className="btn-close p-0"
+  className="modal-x-btn"
   onClick={() => setShowVacantModal(false)}
+  aria-label="Close"
 >
-  x
+  ×
 </button>
 
         </div>
@@ -707,14 +1125,14 @@ setPendingRentList(pendingRentList);
       <div className="modal-content">
         <div className="modal-header">
           <h5 className="modal-title">Upcoming Leave Tenants</h5>
-        <button
-  type="button"
-  className="btn-close p-0"
-  onClick={() => setShowFutureLeaveModal(false)}
->
-  x
-</button>
-
+    <button
+    type="button"
+    className="modal-x-btn"
+    onClick={() => setShowFutureLeaveModal(false)}
+    aria-label="Close"
+  >
+    ×
+  </button>
         </div>
 
         <div className="modal-body">
@@ -729,7 +1147,7 @@ setPendingRentList(pendingRentList);
                   <th>Bed</th>
                   <th>Leave Date</th>
                   <th>Deposit (₹)</th>
-    <th>Refundable (₹)</th>
+    {/* <th>Refundable (₹)</th> */}
                   
 
                 </tr>
@@ -749,7 +1167,7 @@ setPendingRentList(pendingRentList);
           ₹{deposit.toLocaleString("en-IN")}
         </td>
 
-        <td
+        {/* <td
           className={`fw-semibold ${
             isNegative ? "text-danger" : "text-success"
           }`}
@@ -757,7 +1175,7 @@ setPendingRentList(pendingRentList);
           {isNegative
             ? `− ₹${Math.abs(refundable).toLocaleString("en-IN")} (Payable)`
             : `₹${refundable.toLocaleString("en-IN")}`}
-        </td>
+        </td> */}
       </tr>
     );
   })}
@@ -773,6 +1191,86 @@ setPendingRentList(pendingRentList);
           <button
             className="btn btn-secondary"
             onClick={() => setShowFutureLeaveModal(false)}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+)}
+{showPendingRentModal && (
+  <div
+    className="modal d-block"
+    tabIndex="-1"
+    style={{
+      background: "rgba(0,0,0,0.5)",
+      position: "fixed",
+      inset: 0,
+      zIndex: 9999
+    }}
+  >
+    <div className="modal-dialog modal-lg modal-dialog-centered">
+      <div className="modal-content">
+        <div className="modal-header">
+          <h5 className="modal-title">Pending Rents (This Month)</h5>
+
+          <button
+            type="button"
+            className="modal-x-btn"
+            onClick={() => setShowPendingRentModal(false)}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="modal-body">
+          {pendingRentList.length === 0 ? (
+            <p>No pending rents for this month.</p>
+          ) : (
+            <table className="table table-bordered">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Room</th>
+                  <th>Bed</th>
+                  <th>Phone</th>
+                  <th>Monthly Rent (₹)</th>
+                  <th>Due This Month (₹)</th>
+                 
+                </tr>
+              </thead>
+              <tbody>
+                {pendingRentList.map((t, i) => {
+                  const monthlyRent = Number(t.baseRent || t.rentAmount || 0);
+                  const totalPastPending = calculatePendingRent(t); // uses your function
+
+                  return (
+                    <tr key={t._id || i}>
+                      <td>{t.name}</td>
+                      <td>{t.roomNo}</td>
+                      <td>{t.bedNo}</td>
+                      <td>{t.phoneNo || "-"}</td>
+
+                      <td className="fw-semibold">₹{monthlyRent.toLocaleString("en-IN")}</td>
+
+                      <td className="fw-semibold text-danger">
+                        ₹{monthlyRent.toLocaleString("en-IN")}
+                      </td>
+
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="modal-footer">
+          <button
+            className="btn btn-secondary"
+            onClick={() => setShowPendingRentModal(false)}
           >
             Close
           </button>

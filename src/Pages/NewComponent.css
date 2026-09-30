@@ -240,13 +240,13 @@
  
 }
 
-/* Zebra rows */
-.rent-table-wrapper tbody tr {
-  background: rgba(255, 255, 255, 0.8);
+/* Alternate by room group, not by individual tenant row. */
+.rent-table-wrapper tbody tr.room-group-a > td {
+  background: rgba(240, 236, 255, 0.7) !important;
 }
 
-.rent-table-wrapper tbody tr:nth-child(odd) {
-  background: rgba(240, 236, 255, 0.7);
+.rent-table-wrapper tbody tr.room-group-b > td {
+  background: rgba(255, 255, 255, 0.8) !important;
 }
 
 .rent-table-wrapper tbody tr:hover {
@@ -767,6 +767,32 @@
 
 .tenant-open { cursor: pointer; }
 .tenant-open:hover { opacity: 0.95; }
+
+/* Per-tenant rent-month navigation */
+.tenant-month-nav {
+  width: 38px;
+  height: 58px;
+  border-radius: 11px;
+  cursor: pointer;
+  transition: background-color .16s ease, color .16s ease, transform .16s ease;
+}
+
+.tenant-month-nav:hover:not(:disabled),
+.tenant-month-nav:focus-visible {
+  background: #6264ee !important;
+  color: #101010 !important;
+  outline: none;
+}
+
+.tenant-month-nav:active:not(:disabled) {
+  background: #4f51dc !important;
+  transform: scale(.96);
+}
+
+.tenant-month-nav:disabled {
+  color: #c5c7d4 !important;
+  cursor: default;
+}
 .modal {
   position: fixed;
   inset: 0;

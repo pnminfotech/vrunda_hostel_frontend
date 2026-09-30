@@ -154,8 +154,17 @@ export default function TenantHolidayManagement({ embedded = false }) {
       });
 
       if (!res.ok) throw new Error("Save failed");
+      const data = await res.json();
+      const sms = editId ? data.returnSms : data.holiday?.smsStatus ? {
+        status: data.holiday.smsStatus,
+        error: data.holiday.smsError,
+      } : null;
 
-      alert(editId ? "Holiday updated" : "Holiday saved");
+      alert(
+        `${editId ? "Holiday updated" : "Holiday saved"}${
+          sms ? `\nHoliday SMS: ${sms.status}${sms.error ? ` (${sms.error})` : ""}` : ""
+        }`
+      );
       setShowModal(false);
       setForm(emptyForm);
       setEditId(null);
@@ -185,6 +194,9 @@ export default function TenantHolidayManagement({ embedded = false }) {
         method: "PATCH",
       });
       if (!res.ok) throw new Error("Failed");
+      const data = await res.json();
+      const sms = data.returnSms;
+      alert(`Tenant marked as returned${sms ? `\nReturn SMS: ${sms.status}${sms.error ? ` (${sms.error})` : ""}` : ""}`);
       loadData();
     } catch (err) {
       alert(err.message || "Failed to mark returned");

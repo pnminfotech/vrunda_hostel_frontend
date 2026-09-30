@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import "bootstrap/dist/css/bootstrap.min.css";
 import './Style.css';
 import "../Pages/NewComponent.css";
@@ -105,12 +105,14 @@ const [pendingTenants, setPendingTenants] = useState([]);
   const [shiftTargetKey, setShiftTargetKey] = useState(""); // "roomNo-bedNo"
 
   const [rentStart, setRentStart] = useState(null); // shared 3-month window start
+  const [tenantMonthStarts, setTenantMonthStarts] = useState({});
+  const [allTenantMonthStarts, setAllTenantMonthStarts] = useState({});
   const [docs, setDocs] = useState([]);
   const [editingTenant, setEditingTenant] = useState(null);
   const [editRentAmount, setEditRentAmount] = useState("");
   const [editRentDate, setEditRentDate] = useState("");
 
-  
+
   const [activeTab, setActiveTab] = useState("rent");
   const [lightBills, setLightBills] = useState([]);
   // const [activeTab, setActiveTab] = useState('light'); // 'light' or 'other'
@@ -118,6 +120,10 @@ const [pendingTenants, setPendingTenants] = useState([]);
   const [leaveDates, setLeaveDates] = useState({});
   const [deletedData, setDeletedData] = useState([]);
   const [showLeaveModal, setShowLeaveModal] = useState(false);
+const [showUndoBedModal, setShowUndoBedModal] = useState(false);
+const [undoTenant, setUndoTenant] = useState(null);
+const [undoOccupiedBy, setUndoOccupiedBy] = useState("");
+const [undoTargetKey, setUndoTargetKey] = useState("");
   const [selectedLeaveDate, setSelectedLeaveDate] = useState("");
   const [leaveActionType, setLeaveActionType] = useState("leave"); // leave | holiday
   const [selectedHolidayFromDate, setSelectedHolidayFromDate] = useState("");
@@ -209,6 +215,9 @@ const [addingQuickRoom, setAddingQuickRoom] = useState(false);
 const [quickRoomMsg, setQuickRoomMsg] = useState("");
 const [submittingAdd, setSubmittingAdd] = useState(false); // for Save
 const [creatingInvite, setCreatingInvite] = useState(false); // for Share Link
+const importInputRef = useRef(null);
+const [importingTenants, setImportingTenants] = useState(false);
+const [importResult, setImportResult] = useState(null);
 
 
 const addRoomFromTenantModal = async () => {
@@ -323,20 +332,51 @@ const [editBillingCycle, setEditBillingCycle] = useState("Monthly");
 
 // which year you are selecting months for
 const [selectedYM, setSelectedYM] = useState([]);
+const resetRentEditor = () => {
+  setEditingTenant(null);
+  setSelectedYM([]);
+  setEditRentAmount("");
+  setEditRentDate(new Date().toISOString().slice(0, 10));
+  setEditPaymentMode("Cash");
+  setEditBillingCycle("Monthly");
+  setEditYear(new Date().getFullYear());
+  setEditMonthYM({ y: null, m: null });
+};
+const getRemainingRentForMonths = (tenant, periods) =>
+  (periods || []).reduce((total, period) => {
+    const cell = getMonthCell(tenant, period.y, period.m);
+    return total + Number(cell?.outstanding || 0);
+  }, 0);
+
+const getConsecutiveMonths = (start, count) => {
+  const first = start || { y: new Date().getFullYear(), m: new Date().getMonth() };
+  return Array.from({ length: count }, (_, index) => {
+    const value = first.y * 12 + first.m + index;
+    return { y: Math.floor(value / 12), m: value % 12 };
+  });
+};
+
+const changeBillingCycle = (cycle) => {
+  const periods = getConsecutiveMonths(selectedYM[0], CYCLE_LIMIT[cycle] || 1);
+  setEditBillingCycle(cycle);
+  setSelectedYM(periods);
+  setEditYear(periods[0].y);
+  if (editingTenant) setEditRentAmount(String(getRemainingRentForMonths(editingTenant, periods)));
+};
 const toggleMonth = (m) => {
   const limit = CYCLE_LIMIT[editBillingCycle] || 1;
 
   setSelectedYM((prev) => {
     const exists = prev.some((x) => x.y === editYear && x.m === m);
-    if (exists) {
-      return prev.filter((x) => !(x.y === editYear && x.m === m));
-    }
-
-    if (prev.length >= limit) return prev;
-
-    return [...prev, { y: editYear, m }].sort((a, b) =>
-      a.y !== b.y ? a.y - b.y : a.m - b.m
-    );
+    const next = exists
+      ? prev.filter((x) => !(x.y === editYear && x.m === m))
+      : prev.length >= limit
+        ? prev
+        : [...prev, { y: editYear, m }].sort((a, b) =>
+            a.y !== b.y ? a.y - b.y : a.m - b.m
+          );
+    if (editingTenant) setEditRentAmount(String(getRemainingRentForMonths(editingTenant, next)));
+    return next;
   });
 };
 
@@ -694,12 +734,13 @@ const [editPaymentMode, setEditPaymentMode] = useState("Cash");
   const [showDueModal, setShowDueModal] = useState(false);
   const [dueMonths, setDueMonths] = useState([]);
   const [selectedTenantName, setSelectedTenantName] = useState("");
+  const [selectedDueTenant, setSelectedDueTenant] = useState(null);
 
   const [showStatusModal, setShowStatusModal] = useState(false);
   // const [statusMonths, setStatusMonths] = useState([]);
   // const [statusTenantName, setStatusTenantName] = useState("");
 
-  const [selectedYear, setSelectedYear] = useState("All Records");
+  const [selectedYear, setSelectedYear] = useState(String(new Date().getFullYear()));
 const [editMonthYM, setEditMonthYM] = useState({ y: null, m: null });
  const closeFormModal = () => {
  setShowAddModal(false);
@@ -708,13 +749,14 @@ const [editMonthYM, setEditMonthYM] = useState({ y: null, m: null });
   // setSomethingElse(...)
 };
 const years = useMemo(() => {
-  const ys = new Set();
+  const ys = new Set([new Date().getFullYear()]);
   (formData || []).forEach((d) => {
-    if (!d?.joiningDate) return;
-    const dd = new Date(d.joiningDate);
-    if (!isNaN(dd)) ys.add(dd.getFullYear());
+    if (d?.joiningDate) {
+      const dd = new Date(d.joiningDate);
+      if (!isNaN(dd)) ys.add(dd.getFullYear());
+    }
   });
-  return ["All Records", ...Array.from(ys).sort((a, b) => b - a)];
+  return Array.from(ys).sort((a, b) => b - a);
 }, [formData]);
 
 
@@ -730,6 +772,76 @@ const existingForm = formData?.find(
       .replace(/\/+$/, "") + "/";
 
 const ROOMS_API = `${apiUrl}rooms`;
+
+  const importHeaders = [
+    "name", "phoneNo", "joiningDate", "roomNo", "bedNo", "floorNo", "category", "depositAmount",
+    "baseRent", "address", "dob", "dateOfJoiningCollege", "companyAddress", "tenantParents", "leaveDate",
+    "relativeAddress", "relative1Relation", "relative1Name", "relative1Phone",
+    "relative2Relation", "relative2Name", "relative2Phone"
+  ];
+
+  const downloadTenantImportTemplate = () => {
+    const sheet = XLSX.utils.aoa_to_sheet([
+      importHeaders,
+      ["Jane Doe", "9876543210", "2026-09-01", "101", "1", "1", "Standard", "5000", "7000", "Full address", "2000-01-15", "2020-06-01", "", "", "", "", "Self", "", "", "Self", "", ""]
+    ]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "Tenants");
+    XLSX.writeFile(workbook, "tenant-import-template.xlsx");
+  };
+
+  const handleTenantImport = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      setImportingTenants(true);
+      setImportResult(null);
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+      const aliases = {
+        "phone no": "phoneNo", phone: "phoneNo", mobile: "phoneNo", mobileNo: "phoneNo",
+        "joining date": "joiningDate", "room no": "roomNo", "bed no": "bedNo", "floor no": "floorNo",
+        "deposit amount": "depositAmount", rent: "baseRent", "base rent": "baseRent",
+        "date of birth": "dob", "college joining date": "dateOfJoiningCollege",
+        "date of joining college": "dateOfJoiningCollege", "company joining date": "dateOfJoiningCollege",
+        "company address / college": "companyAddress", "relative address": "relativeAddress",
+        "parent 1 relation": "relative1Relation", "parent 1 name": "relative1Name", "parent 1 phone": "relative1Phone",
+        "parent 2 relation": "relative2Relation", "parent 2 name": "relative2Name", "parent 2 phone": "relative2Phone"
+      };
+      const rows = rawRows.map((raw, index) => {
+        const row = { __rowNumber: index + 2 };
+        Object.entries(raw).forEach(([key, value]) => {
+          const normalized = String(key).trim().replace(/[_-]/g, " ").replace(/\s+/g, " ");
+          const target = aliases[normalized.toLowerCase()] || key.trim();
+          row[target] = value instanceof Date ? value.toISOString().slice(0, 10) : value;
+        });
+        return row;
+      }).filter((row) => Object.entries(row).some(([key, value]) => key !== "__rowNumber" && String(value).trim()));
+
+      if (!rows.length) throw new Error("The selected file has no tenant rows.");
+      const { data } = await axios.post(`${apiUrl}forms/import`, { rows });
+      await refreshTenants();
+      setImportResult({
+        createdCount: data.createdCount || 0,
+        failed: data.failed || [],
+        smsSentCount: data.smsSentCount || 0,
+        smsProblems: (data.sms || []).filter((item) => item.status !== "sent"),
+      });
+    } catch (error) {
+      setImportResult({
+        createdCount: 0,
+        failed: [{ row: "—", error: error?.response?.data?.message || error?.message || "Tenant import failed." }],
+        smsSentCount: 0,
+        smsProblems: [],
+      });
+    } finally {
+      setImportingTenants(false);
+    }
+  };
 
   const refreshTenants = React.useCallback(async () => {
   try {
@@ -1686,6 +1798,7 @@ fd.append("baseRent", String(rentAmount)); // ✅ monthly expected rent
     alert(`Tenant saved successfully.${smsInfo}`);
     
     console.log("Saved tenant:", res.data);
+    await refreshTenants();
 closeAddTenantModal(); // ✅ closes + clears form
 
     setSelfAadharFile(null);
@@ -2055,6 +2168,76 @@ const closeAddTenantModal = () => {
   const canRight = start + PAGE < months.length;
   const visibleMonths = months.slice(start, start + PAGE);
 
+  // Each tenant gets an independent 3-month window. It cannot leave the year
+  // chosen in the top filter; "All Records" uses the current calendar year.
+  const tenantNavigationYear = Number(selectedYear) || new Date().getFullYear();
+  const globalMonthStart = allTenantMonthStarts[String(tenantNavigationYear)] ??
+    Math.min(new Date().getMonth(), 12 - PAGE);
+  const navigationHeaderMonths = Array.from({ length: PAGE }, (_, m) => ({
+    y: tenantNavigationYear,
+    m: globalMonthStart + m,
+    label: new Date(tenantNavigationYear, globalMonthStart + m, 1)
+      .toLocaleString("en-IN", { month: "short", year: "numeric" }),
+  }));
+  const getTenantVisibleMonths = (tenant) => {
+    const maxStart = 12 - PAGE;
+    const joined = tenant?.joiningDate ? new Date(tenant.joiningDate) : null;
+    const defaultStart = joined && joined.getFullYear() === tenantNavigationYear
+      ? Math.min(Math.max(joined.getMonth(), 0), maxStart)
+      : 0;
+    const savedStart = tenantMonthStarts[`${tenantNavigationYear}:${String(tenant?._id)}`];
+    const monthStart = Number.isInteger(savedStart)
+      ? Math.min(Math.max(savedStart, 0), maxStart)
+      : defaultStart;
+    return Array.from({ length: PAGE }, (_, index) => {
+      const month = monthStart + index;
+      return {
+        y: tenantNavigationYear,
+        m: month,
+        label: new Date(tenantNavigationYear, month, 1)
+          .toLocaleString("en-IN", { month: "short", year: "numeric" }),
+      };
+    });
+  };
+  const moveTenantMonths = (tenant, direction) => {
+    const maxStart = 12 - PAGE;
+    const joined = tenant?.joiningDate ? new Date(tenant.joiningDate) : null;
+    const defaultStart = joined && joined.getFullYear() === tenantNavigationYear
+      ? Math.min(Math.max(joined.getMonth(), 0), maxStart)
+      : 0;
+    setTenantMonthStarts((previous) => {
+      const tenantKey = `${tenantNavigationYear}:${String(tenant._id)}`;
+      const current = Number.isInteger(previous[tenantKey])
+        ? previous[tenantKey]
+        : defaultStart;
+      return {
+        ...previous,
+        [tenantKey]: Math.min(maxStart, Math.max(0, current + direction)),
+      };
+    });
+  };
+  const moveAllTenantMonths = (direction) => {
+    const maxStart = 12 - PAGE;
+    const nextGlobalStart = Math.min(maxStart, Math.max(0, globalMonthStart + direction));
+    setAllTenantMonthStarts((previous) => ({
+      ...previous,
+      [String(tenantNavigationYear)]: nextGlobalStart,
+    }));
+    setTenantMonthStarts((previous) => {
+      const next = { ...previous };
+      (visibleTenants || []).forEach((tenant) => {
+        const tenantKey = `${tenantNavigationYear}:${String(tenant._id)}`;
+        const joined = tenant?.joiningDate ? new Date(tenant.joiningDate) : null;
+        const defaultStart = joined && joined.getFullYear() === tenantNavigationYear
+          ? Math.min(Math.max(joined.getMonth(), 0), maxStart)
+          : 0;
+        const current = Number.isInteger(previous[tenantKey]) ? previous[tenantKey] : defaultStart;
+        next[tenantKey] = Math.min(maxStart, Math.max(0, current + direction));
+      });
+      return next;
+    });
+  };
+
   const goLeft = (e) => {
     e?.stopPropagation?.();
     setRentStart((s) => {
@@ -2399,7 +2582,7 @@ const getRentStatusLabelForSort = (tenant) => {
         setError("Failed to fetch data");
         setLoading(false);
       });
-  }, []);
+  }, [apiUrl]);
 
   useEffect(() => {
     axios
@@ -2437,7 +2620,7 @@ const getRentStatusLabelForSort = (tenant) => {
         setActiveHolidaysByTenant(map);
       })
       .catch((err) => console.error("Error fetching holiday data:", err));
-  }, []);
+  }, [apiUrl, activeTab]);
   // useEffect(() => {
   //   axios
   //     .get(`${apiUrl}forms/archived`)
@@ -2665,7 +2848,7 @@ const calculateDue = (rents = [], joiningDateStr, tenant, roomsData) => {
   return months.reduce((sum, m) => {
     const c = getMonthCell(tenant, m.y, m.m);
     const isRealDue =
-      c?.isPast && (c.label === "Due" || c.label === "Pending");
+      c?.isPast && (c.label === "Due" || c.label === "Pend" || c.label === "Pending");
     return sum + (isRealDue ? Number(c.outstanding || 0) : 0);
   }, 0);
 };
@@ -2691,15 +2874,14 @@ const compareRoomBed = (a, b) => {
     const bed = t.bedNo != null ? String(t.bedNo) : "";
     const joinYear = t.joiningDate
       ? String(new Date(t.joiningDate).getFullYear())
-      : null;
-
+      : "";
     const leaveISO = leaveDates[t._id];
     const isLeaved = leaveISO && new Date(leaveISO) < new Date();
 
     return (
       !isLeaved &&
       (name.includes(search) || bed.includes(search)) &&
-      (selectedYear === "All Records" || joinYear === String(selectedYear))
+      joinYear === String(selectedYear)
     );
   });
 
@@ -2806,8 +2988,7 @@ return sorted;
       String(slot.bedNo).toLowerCase().includes(search) ||
       String(slot.roomNo).toLowerCase().includes(search);
 
-    const matchesYear = selectedYear === "All Records";
-    return matchesSearch && matchesYear;
+    return matchesSearch;
   })
   .sort(compareRoomBed); // ✅ vacant flow
 
@@ -2876,10 +3057,18 @@ return sorted;
     // setEditRentDate(date);
 setEditingTenant(tenant);
 setEditMonthYM({ y: year, m: monthIdx });
-// date field now will be "today", set once on open:
-setEditRentDate(new Date().toISOString().split("T")[0]);
-    // Optional: clear or auto-suggest amount
-    // setEditRentAmount(expectFromTenant(tenant, roomsData));
+    const monthCell = getMonthCell(tenant, year, monthIdx);
+    // Opening a month directly starts a fresh payment. For a pending month,
+    // show only the remaining balance; otherwise leave the amount blank.
+    setEditBillingCycle("Monthly");
+    setEditYear(year);
+    setSelectedYM([{ y: year, m: monthIdx }]);
+    setEditRentAmount(
+      monthCell?.isPast && Number(monthCell?.outstanding || 0) > 0
+        ? String(monthCell.outstanding)
+        : ""
+    );
+    setEditRentDate(new Date().toISOString().slice(0, 10));
   };
   const openAddForSlot = (roomNo, bedNo) => {
     const room = roomsData.find((r) => String(r.roomNo) === String(roomNo));
@@ -3139,6 +3328,7 @@ const EMPTY_TENANT = {
         }));
       }
 
+      await refreshTenants();
       alert("Holiday saved successfully. Parent SMS processed.");
       setShowLeaveModal(false);
       return;
@@ -3165,6 +3355,8 @@ const EMPTY_TENANT = {
       payload
     );
 
+    setLeaveDates((prev) => ({ ...prev, [currentLeaveId]: selectedLeaveDate }));
+    await refreshTenants();
     alert("Leave marked successfully");
     setShowLeaveModal(false);
 
@@ -3227,7 +3419,7 @@ const getAllPendingMonths = (tenant) => {
   months.forEach(({ y, m }) => {
     const c = getMonthCell(tenant, y, m);
     const isRealDue =
-      c?.isPast && (c.label === "Due" || c.label === "Pending");
+      c?.isPast && (c.label === "Due" || c.label === "Pend" || c.label === "Pending");
     if (isRealDue) {
       out.push(
         new Date(y, m, 1).toLocaleString("default", {
@@ -3239,6 +3431,40 @@ const getAllPendingMonths = (tenant) => {
   });
 
   return out;
+};
+
+const openDueMonthsModal = (tenant) => {
+  const rows = getBillingMonthsUpToNow(tenant)
+    .map(({ y, m }) => {
+      const cell = getMonthCell(tenant, y, m);
+      if (!cell?.isPast || cell.beforeRentStart || Number(cell.outstanding || 0) <= 0) return null;
+      return {
+        y, m,
+        month: new Date(y, m, 1).toLocaleString("en-IN", { month: "long", year: "numeric" }),
+        dueDate: cell.dateStr || fmtDM(new Date(y, m, clampDay(y, m, new Date(tenant.joiningDate).getDate()))),
+        cycle: getCycleRangeStr(tenant, y, m),
+        due: Number(cell.expected || 0),
+        paid: Number(cell.amountPaid || 0),
+        balance: Number(cell.outstanding || 0),
+      };
+    })
+    .filter(Boolean);
+  setDueMonths(rows);
+  setSelectedDueTenant(tenant);
+  setSelectedTenantName(tenant.name || "Tenant");
+  setShowDueModal(true);
+};
+
+const addRentForDueMonth = (row) => {
+  if (!selectedDueTenant) return;
+  setEditingTenant(selectedDueTenant);
+  setEditBillingCycle("Monthly");
+  setEditYear(row.y);
+  setSelectedYM([{ y: row.y, m: row.m }]);
+  setEditRentAmount(String(row.balance));
+  setEditRentDate(new Date().toISOString().slice(0, 10));
+  setEditPaymentMode("Cash");
+  setShowDueModal(false);
 };
   const handleEdit = (tenant) => {
     const { rentAmount, date } = getDisplayedRent(tenant.rents);
@@ -3281,28 +3507,64 @@ const getAllPendingMonths = (tenant) => {
 
   // formupdate
 
- const handleUndoClick = async (tenantId) => {
-  if (!window.confirm("Undo this tenant's leave?")) return;
+ const restoreLeavedTenant = async (tenant, targetSlot = null) => {
+  if (!tenant) return;
 
   try {
     const res = await axios.post(
       `${apiUrl}/cancel-leave`,
-      { id: tenantId }
+      {
+        id: tenant._id,
+        ...(targetSlot ? {
+          roomNo: targetSlot.roomNo,
+          bedNo: targetSlot.bedNo,
+          floorNo: targetSlot.floorNo,
+          category: targetSlot.category,
+          baseRent: targetSlot.price,
+        } : {}),
+      }
     );
 
     if (res.data?.success) {
       alert("Leave undone successfully.");
-
-      // Refresh tenant list from backend
       await refreshTenants?.();
+      setLeaveDates((prev) => {
+        const next = { ...prev };
+        delete next[tenant._id];
+        return next;
+      });
+      setShowUndoBedModal(false);
+      setUndoTenant(null);
+      setUndoTargetKey("");
 
     } else {
       alert(res.data?.message || "Failed to undo leave.");
     }
   } catch (error) {
     console.error("Error undoing leave:", error);
-    alert("Failed to undo leave.");
+    alert(error?.response?.data?.message || "Failed to undo leave.");
   }
+};
+
+const handleUndoClick = (tenant) => {
+  const occupiedBy = (formData || []).find((item) =>
+    String(item._id) !== String(tenant._id) &&
+    String(item.roomNo) === String(tenant.roomNo) &&
+    String(item.bedNo) === String(tenant.bedNo) &&
+    !hasLeaveDatePassed(item.leaveDate)
+  );
+
+  if (!occupiedBy) {
+    if (window.confirm("Undo this tenant's leave and restore the original bed?")) {
+      restoreLeavedTenant(tenant);
+    }
+    return;
+  }
+
+  setUndoTenant(tenant);
+  setUndoOccupiedBy(occupiedBy.name || "another tenant");
+  setUndoTargetKey("");
+  setShowUndoBedModal(true);
 };
 const handleDownloadForm = async (tenant) => {
   try {
@@ -3555,14 +3817,17 @@ const payload = {
   billingCycle: editBillingCycle || "Monthly",
 };
 
-await axios.put(`${apiUrl}form/${editingTenant._id}`, payload);
+const { data: savedTenant } = await axios.put(
+  `${apiUrl}form/${editingTenant._id}`,
+  payload
+);
 
 
     // ✅ IMPORTANT:
     // Your backend currently expects { month: "Sep-25" } for single month.
     // For multiple months, backend should accept { months: [] }.
     // If backend not changed yet, this API will fail until you update backend route.
-   
+
 
     // ✅ local update: mark every selected month as paid
   
@@ -3617,8 +3882,15 @@ setFormData((prev) =>
   )
 );
 
-
-    setEditingTenant(null);
+    // The API returns the accumulated monthly payment. Apply that authoritative
+    // value last so a partial payment never appears to replace an earlier one.
+    setFormData((prev) =>
+      prev.map((tenant) =>
+        String(tenant._id) === String(savedTenant._id) ? savedTenant : tenant
+      )
+    );
+    await refreshTenants();
+    resetRentEditor();
   } catch (error) {
     console.error(error);
     alert("Failed to update rent");
@@ -3806,6 +4078,7 @@ const isTodayOrFuture = (iso) => {
 
 
       <div className="d-flex align-items-center mb-4 flex-wrap">
+        <label className="small fw-semibold text-muted me-2 mb-0">Navigation year</label>
         <select
           className="form-select me-2"
           style={{ width: "150px" }}
@@ -3861,6 +4134,28 @@ const isTodayOrFuture = (iso) => {
           <FaPlus className="me-1" /> Add Tenant
         </button>
 
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".xlsx,.xls,.csv"
+          className="d-none"
+          onChange={handleTenantImport}
+        />
+        <button
+          className="btn btn-outline-primary me-2"
+          type="button"
+          disabled={importingTenants}
+          onClick={() => importInputRef.current?.click()}
+        >
+          <FaPlus className="me-1" /> {importingTenants ? "Importing…" : "Import Tenants"}
+        </button>
+        <button
+          className="btn btn-link btn-sm me-2"
+          type="button"
+          onClick={downloadTenantImportTemplate}
+        >
+          Template
+        </button>
         {/* <button
           className="btn me-2"
           style={activeTab === "light" ? style.colorA : style.colorB}
@@ -4240,6 +4535,7 @@ const isTodayOrFuture = (iso) => {
     <button
       type="button"
       className="btn btn-sm btn-outline-secondary me-2"
+      style={{ display: "none" }}
       disabled={!canLeft}
       onClick={goLeft}
       title="Previous months"
@@ -4248,7 +4544,18 @@ const isTodayOrFuture = (iso) => {
     </button>
 
     {/* 🔽 CLICK HERE TO SORT BY RENT STATUS */}
+
+ <span className="ms-3 d-inline-flex align-items-center gap-2">
     <button
+      type="button"
+      className="btn btn-sm btn-outline-secondary"
+      disabled={globalMonthStart === 0}
+      onClick={() => moveAllTenantMonths(-1)}
+      title={`Previous months for all ${tenantNavigationYear} tenants`}
+    >
+      &laquo;
+    </button>
+     <button
       type="button"
       className="btn btn-link p-0 m-0 fw-semibold text-decoration-none text-dark d-inline-flex align-items-center"
       onClick={() => handleSort("status")}
@@ -4256,10 +4563,20 @@ const isTodayOrFuture = (iso) => {
     >
       Rent {renderSortIcon("status")}
     </button>
-
+    <button
+      type="button"
+      className="btn btn-sm btn-secondary"
+      disabled={globalMonthStart >= 12 - PAGE}
+      onClick={() => moveAllTenantMonths(1)}
+      title={`Next months for all ${tenantNavigationYear} tenants`}
+    >
+      &raquo;
+    </button>
+  </span>
     <button
       type="button"
       className="btn btn-sm btn-outline-secondary ms-2"
+      style={{ display: "none" }}
       disabled={!canRight}
       onClick={goRight}
       title="Newer months"
@@ -4292,7 +4609,7 @@ const isTodayOrFuture = (iso) => {
       Name {renderSortIcon("name")}
     </th>
 
-    {visibleMonths.map((m, i) => (
+    {navigationHeaderMonths.map((m, i) => (
       <th
         key={`${m.y}-${m.m}-${i}`}
         className="text-center"
@@ -4319,11 +4636,18 @@ const isTodayOrFuture = (iso) => {
               <tbody>
                 {(() => {
                   let rowCounter = 0;
-                  return groupedRooms.map((room) => (
+                  return groupedRooms.map((room, roomIndex) => (
                     <React.Fragment key={`room-${room.roomNo}`}>
                       {/* Occupied rows */}
                       {room.occupied.map((tenant) => {
                         rowCounter += 1;
+                        const tenantVisibleMonths = getTenantVisibleMonths(tenant);
+                        const tenantMonthStart = tenantMonthStarts[`${tenantNavigationYear}:${String(tenant._id)}`] ??
+                          (new Date(tenant.joiningDate).getFullYear() === tenantNavigationYear
+                            ? Math.min(new Date(tenant.joiningDate).getMonth(), 12 - PAGE)
+                            : 0);
+                        const canTenantGoLeft = tenantMonthStart > 0;
+                        const canTenantGoRight = tenantMonthStart < 12 - PAGE;
                         const dueAmount = calculateDue(
   tenant.rents,
   tenant.joiningDate,
@@ -4339,7 +4663,7 @@ const isTodayOrFuture = (iso) => {
                   return (
                   <tr
                     key={tenant._id}
-                    className={isRoomEnd ? "room-end-row" : ""}
+                    className={`${roomIndex % 2 === 0 ? "room-group-a" : "room-group-b"} ${isRoomEnd ? "room-end-row" : ""}`}
                   >
                                         {/* Sr */}
                                      <td className="text-muted text-center">
@@ -4463,7 +4787,7 @@ const isTodayOrFuture = (iso) => {
                   
                                         {/* Month cells */}
                   {/* Month cells */}
-                 {visibleMonths.map((m, i) => {
+                 {tenantVisibleMonths.map((m, i) => {
   const c = getMonthCell(tenant, m.y, m.m);
   const extraNum = Number(c.extra || 0);
 
@@ -4489,6 +4813,30 @@ const isTodayOrFuture = (iso) => {
 
   return (
     <td key={`${tenant._id}-${m.y}-${m.m}-${i}`} className="text-center">
+      {i === 0 && (
+        <button
+          type="button"
+          className="tenant-month-nav float-start text-dark fw-bold"
+          disabled={!canTenantGoLeft}
+          onClick={(event) => { event.stopPropagation(); moveTenantMonths(tenant, -1); }}
+          title={`Previous months in ${tenantNavigationYear}`}
+          style={{ fontSize: 32, lineHeight: 1, border: "none", background: "transparent", padding: 0, textDecoration: "none", boxShadow: "none" }}
+        >
+          &lsaquo;
+        </button>
+      )}
+      {i === PAGE - 1 && (
+        <button
+          type="button"
+          className="tenant-month-nav float-end text-dark fw-bold"
+          disabled={!canTenantGoRight}
+          onClick={(event) => { event.stopPropagation(); moveTenantMonths(tenant, 1); }}
+          title={`Next months in ${tenantNavigationYear}`}
+          style={{ fontSize: 32, lineHeight: 1, border: "none", background: "transparent", padding: 0, textDecoration: "none", boxShadow: "none" }}
+        >
+          &rsaquo;
+        </button>
+      )}
       <div
         style={{ cursor: "pointer" }}
         onClick={() => openEditForTenantMonth(tenant._id, m.m, m.y)}
@@ -4638,10 +4986,7 @@ const isTodayOrFuture = (iso) => {
                       color: dueAmount > 0 ? "red" : "inherit",
                     }}
                     onClick={() => {
-                      const dueList = getAllPendingMonths(tenant.rents, tenant.joiningDate);
-                      setDueMonths(dueList);
-                      setSelectedTenantName(tenant.name);
-                      setShowDueModal(true);
+                      openDueMonthsModal(tenant);
                     }}
                   >
                     ₹{dueAmount.toLocaleString("en-IN")}
@@ -4793,7 +5138,7 @@ const isTodayOrFuture = (iso) => {
                   return (
                     <tr
                       key={`vacant-${key}`}
-                      className={isRoomEnd ? "room-end-row" : ""}
+                      className={`${roomIndex % 2 === 0 ? "room-group-a" : "room-group-b"} ${isRoomEnd ? "room-end-row" : ""}`}
                     >
                       <td className="text-muted">{rowCounter}</td>
                       <td>
@@ -4936,7 +5281,7 @@ const isTodayOrFuture = (iso) => {
                 {isUndoAllowed && (
                   <button
                     className="btn btn-sm btn-success"
-                    onClick={() => handleUndoClick(tenant._id)}
+                    onClick={() => handleUndoClick(tenant)}
                     title="Undo leave (allowed within 30 days)"
                   >
                     <FaUndo />
@@ -6130,7 +6475,7 @@ const isTodayOrFuture = (iso) => {
           tabIndex="-1"
           style={{ backgroundColor: "rgba(0,0,0,0.5)" }}
         >
-          <div className="modal-dialog">
+          <div className="modal-dialog modal-lg modal-dialog-scrollable">
             <div className="modal-content">
               <div className="modal-header">
                 <h5 className="modal-title">Add New Tenant</h5>
@@ -6491,13 +6836,100 @@ const isTodayOrFuture = (iso) => {
         </div>
       )}
 
+      {showUndoBedModal && undoTenant && (
+        <div className="modal d-block" tabIndex="-1" style={{ backgroundColor: "rgba(0,0,0,0.5)" }}>
+          <div className="modal-dialog modal-lg modal-dialog-scrollable">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h5 className="modal-title">Choose a vacant bed to restore {undoTenant.name}</h5>
+                <button type="button" className="btn-close p-0" onClick={() => { setShowUndoBedModal(false); setUndoTenant(null); setUndoTargetKey(""); }}>x</button>
+              </div>
+              <div className="modal-body">
+                <div className="alert alert-warning">
+                  Room {undoTenant.roomNo}, bed {undoTenant.bedNo} is currently occupied by <strong>{undoOccupiedBy}</strong>.
+                </div>
+                <label className="form-label">Vacant bed</label>
+                <select className="form-select" value={undoTargetKey} onChange={(event) => setUndoTargetKey(event.target.value)}>
+                  <option value="">Select a vacant room and bed</option>
+                  {allVacantSlots.map((slot) => {
+                    const key = `${slot.roomNo}|||${slot.bedNo}`;
+                    return <option key={key} value={key}>
+                      Room {slot.roomNo} · Bed {slot.bedNo} · Floor {slot.floorNo || "-"}{slot.price ? ` · ₹${Number(slot.price).toLocaleString("en-IN")}` : ""}
+                    </option>;
+                  })}
+                </select>
+                {!allVacantSlots.length && <small className="text-danger d-block mt-2">No vacant beds are available.</small>}
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" onClick={() => { setShowUndoBedModal(false); setUndoTenant(null); setUndoTargetKey(""); }}>Cancel</button>
+                <button
+                  type="button"
+                  className="btn btn-success"
+                  disabled={!undoTargetKey}
+                  onClick={() => {
+                    const targetSlot = allVacantSlots.find((slot) => `${slot.roomNo}|||${slot.bedNo}` === undoTargetKey);
+                    restoreLeavedTenant(undoTenant, targetSlot);
+                  }}
+                >
+                  Restore Tenant
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {importResult && (
+        <div className="modal d-block" tabIndex="-1" style={{ backgroundColor: "rgba(0,0,0,0.5)" }}>
+          <div className="modal-dialog modal-lg modal-dialog-scrollable">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h5 className="modal-title">Tenant Import Result</h5>
+                <button type="button" className="btn-close p-0" onClick={() => setImportResult(null)}>x</button>
+              </div>
+              <div className="modal-body">
+                <div className={importResult.failed.length ? "alert alert-warning" : "alert alert-success"}>
+                  Imported <strong>{importResult.createdCount}</strong> tenant(s). SMS sent: <strong>{importResult.smsSentCount}</strong>.
+                </div>
+                {importResult.failed.length > 0 && (
+                  <>
+                    <h6>Rows needing attention</h6>
+                    <div className="table-responsive">
+                      <table className="table table-bordered table-sm mb-3">
+                        <thead className="table-light"><tr><th>Row</th><th>Tenant</th><th>Reason</th></tr></thead>
+                        <tbody>{importResult.failed.map((item, index) => (
+                          <tr key={`${item.row}-${index}`}>
+                            <td>{item.row}</td><td>{item.name || "—"}</td><td className="text-danger">{item.error}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+                {importResult.smsProblems.length > 0 && (
+                  <>
+                    <h6>SMS delivery issues</h6>
+                    <ul className="mb-0">{importResult.smsProblems.map((item, index) => (
+                      <li key={`${item.row}-${index}`}>Row {item.row} ({item.name || "Tenant"}): {item.error || item.status}</li>
+                    ))}</ul>
+                  </>
+                )}
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" onClick={() => setImportResult(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showDueModal && (
         <div
           className="modal d-block"
           tabIndex="-1"
           style={{ backgroundColor: "rgba(0,0,0,0.5)" }}
         >
-          <div className="modal-dialog">
+          <div className="modal-dialog modal-lg modal-dialog-scrollable">
             <div className="modal-content">
               <div className="modal-header">
                 <h5 className="modal-title">
@@ -6511,19 +6943,23 @@ const isTodayOrFuture = (iso) => {
               </div>
               <div className="modal-body">
                 {dueMonths.length > 0 ? (
-                  <ul className="list-group">
-                    {/* {dueMonths.map((month, idx) => (
-                      <li key={idx} className="list-group-item">
-                        {month}
-                      </li>
-                    ))} */}
-                    {dueMonths.map((month, idx) => (
-  <li key={`${month}-${idx}`} className="list-group-item">
-    {month}
-  </li>
-))}
-
-                  </ul>
+                  <div className="table-responsive">
+                    <table className="table table-bordered align-middle mb-0" style={{ minWidth: 720 }}>
+                      <thead className="table-light"><tr>
+                        <th>Month</th><th>Cycle</th><th className="text-end">Due</th><th className="text-end">Paid</th><th className="text-end">Balance</th><th className="text-center">Action</th>
+                      </tr></thead>
+                      <tbody>{dueMonths.map((row) => (
+                        <tr key={`${row.y}-${row.m}`}>
+                          <td><strong>{row.month}</strong><br /><small className="text-muted">Due {row.dueDate}</small></td>
+                          <td>{row.cycle}</td>
+                          <td className="text-end">₹{row.due.toLocaleString("en-IN")}</td>
+                          <td className="text-end">₹{row.paid.toLocaleString("en-IN")}</td>
+                          <td className="text-end text-danger fw-bold">₹{row.balance.toLocaleString("en-IN")}</td>
+                          <td className="text-center"><button className="btn btn-warning text-white btn-sm" onClick={() => addRentForDueMonth(row)}>Add Rent</button></td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
                 ) : (
                   <p className="text-success">No dues!</p>
                 )}
@@ -7473,7 +7909,7 @@ const isTodayOrFuture = (iso) => {
                 <button
                   type="button"
                   className="btn-close p-0"
-                  onClick={() => setEditingTenant(null)}
+                  onClick={resetRentEditor}
                 >x</button>
               </div>
               <div className="modal-body">
@@ -7484,7 +7920,7 @@ const isTodayOrFuture = (iso) => {
   <select
     className="form-control"
     value={editBillingCycle}
-    onChange={(e) => setEditBillingCycle(e.target.value)}
+    onChange={(e) => changeBillingCycle(e.target.value)}
   >
     <option value="Monthly">Monthly</option>
     <option value="Quarterly">Quarterly</option>
@@ -7492,7 +7928,7 @@ const isTodayOrFuture = (iso) => {
     <option value="Yearly">Yearly</option>
   </select>
   <small className="text-muted">
-    Select up to {CYCLE_LIMIT[editBillingCycle]} month(s).
+    {CYCLE_LIMIT[editBillingCycle]} month(s) are selected automatically and the amount is calculated from their remaining balances.
   </small>
 </div>
 
@@ -7598,7 +8034,7 @@ const isTodayOrFuture = (iso) => {
                  <button
                   type="button"
                   className="btn btn-secondary"
-                  onClick={() => setEditingTenant(null)}
+                  onClick={resetRentEditor}
                 >
                   Cancel
                 </button> 
